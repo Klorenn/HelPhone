@@ -168,24 +168,74 @@ function stellarExpertAccountUrl(walletAddress) {
   return walletAddress ? `https://stellar.expert/explorer/testnet/account/${walletAddress}` : ''
 }
 
+function actionLabel(action = '') {
+  const normalized = String(action || '').replace(/_zk_proof$/, '')
+  const labels = {
+    request_created: 'Help request',
+    aid_offered: 'Help offer',
+    aid_claimed: 'Aid claim',
+    location_proof: 'Location proof',
+  }
+  return labels[normalized] || normalized.replace(/_/g, ' ') || 'Checkpoint'
+}
+
+function receiptCopy(action = '') {
+  const normalized = String(action || '').replace(/_zk_proof$/, '')
+  if (normalized === 'aid_offered') {
+    return {
+      title: 'Help offer registered',
+      body: 'Your help offer is on Stellar. The person asking for help can see your responder pin, and the ZK checkpoint is attached when it finishes.',
+    }
+  }
+  if (normalized === 'request_created') {
+    return {
+      title: 'Help request registered',
+      body: 'Your help request is on Stellar. Nearby helpers can see it, and the ZK checkpoint is attached when it finishes.',
+    }
+  }
+  if (normalized === 'aid_claimed') {
+    return {
+      title: 'Aid claim registered',
+      body: 'The aid claim is on Stellar and can be checked from the transaction link.',
+    }
+  }
+  return {
+    title: 'Checkpoint registered',
+    body: 'The action is on Stellar. The transaction link is the public receipt.',
+  }
+}
+
+function shortHash(hash = '') {
+  return hash ? `${hash.slice(0, 10)}...${hash.slice(-8)}` : ''
+}
+
 function FlowProgressModal({
   open,
   onClose,
   title,
   accentColor,
+  receiptAction,
   location,
   profile,
   walletAddress,
   entries,
   active,
   txHash,
+  actionTxHash,
+  proofTxHash,
   error,
   canRetryProof,
   onRetryProof,
 }) {
   if (!open) return null
-  const txUrl = stellarExpertTxUrl(txHash)
+  const copy = receiptCopy(receiptAction)
+  const fallbackTxHash = txHash || actionTxHash || proofTxHash || ''
+  const txUrl = stellarExpertTxUrl(proofTxHash || actionTxHash || fallbackTxHash)
+  const actionUrl = stellarExpertTxUrl(actionTxHash)
+  const proofUrl = stellarExpertTxUrl(proofTxHash)
   const accountUrl = stellarExpertAccountUrl(walletAddress)
+  const hasActionReceipt = Boolean(actionTxHash || fallbackTxHash)
+  const hasProofReceipt = Boolean(proofTxHash)
 
   return (
     <div style={{
@@ -228,6 +278,19 @@ function FlowProgressModal({
         </div>
 
         <div style={{ padding: '16px 18px 18px' }}>
+          <div style={{
+            marginBottom: '12px', padding: '11px 12px', borderRadius: '10px',
+            background: hasActionReceipt ? 'rgba(63,132,135,0.12)' : 'rgba(255,255,255,0.04)',
+            border: `1px solid ${hasActionReceipt ? 'rgba(63,132,135,0.25)' : 'rgba(255,255,255,0.06)'}`
+          }}>
+            <div style={{ fontSize: '13px', fontWeight: 800, color: hasActionReceipt ? '#7fb8ba' : '#F4ECDC', marginBottom: '4px' }}>
+              {hasActionReceipt ? copy.title : actionLabel(receiptAction)}
+            </div>
+            <div style={{ fontSize: '11px', lineHeight: 1.45, color: 'rgba(242,236,220,0.54)' }}>
+              {copy.body}
+            </div>
+          </div>
+
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '12px' }}>
             {[
               ['Location', location ? `${location[0].toFixed(5)}, ${location[1].toFixed(5)}` : 'Not set'],
@@ -244,6 +307,42 @@ function FlowProgressModal({
               </div>
             ))}
           </div>
+
+          {(hasActionReceipt || hasProofReceipt) && (
+            <div style={{
+              display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px',
+              marginBottom: '12px'
+            }}>
+              <div style={{
+                padding: '10px 11px', borderRadius: '8px', background: 'rgba(255,255,255,0.04)',
+                border: '1px solid rgba(255,255,255,0.06)', minWidth: 0
+              }}>
+                <div style={{ fontSize: '9px', letterSpacing: '1px', color: 'rgba(242,236,220,0.32)', marginBottom: '5px' }}>ACTION TX</div>
+                {actionUrl ? (
+                  <a href={actionUrl} target="_blank" rel="noreferrer" style={{ fontSize: '11px', color: '#7fb8ba', textDecoration: 'none', wordBreak: 'break-all' }}>
+                    {shortHash(actionTxHash)}
+                  </a>
+                ) : (
+                  <div style={{ fontSize: '11px', color: 'rgba(242,236,220,0.34)' }}>{hasActionReceipt ? 'Recorded' : 'Waiting'}</div>
+                )}
+              </div>
+              <div style={{
+                padding: '10px 11px', borderRadius: '8px', background: hasProofReceipt ? 'rgba(63,132,135,0.1)' : 'rgba(255,255,255,0.04)',
+                border: `1px solid ${hasProofReceipt ? 'rgba(63,132,135,0.25)' : 'rgba(255,255,255,0.06)'}`, minWidth: 0
+              }}>
+                <div style={{ fontSize: '9px', letterSpacing: '1px', color: 'rgba(242,236,220,0.32)', marginBottom: '5px' }}>ZK TX</div>
+                {proofUrl ? (
+                  <a href={proofUrl} target="_blank" rel="noreferrer" style={{ fontSize: '11px', color: '#7fb8ba', textDecoration: 'none', wordBreak: 'break-all' }}>
+                    {shortHash(proofTxHash)}
+                  </a>
+                ) : (
+                  <div style={{ fontSize: '11px', color: error ? '#FF7A6B' : 'rgba(242,236,220,0.34)' }}>
+                    {error ? 'Pending retry' : active ? 'Generating' : 'Pending'}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           <ZkProgressLog entries={entries} active={active} />
 
@@ -374,7 +473,10 @@ export default function Help() {
   const [zkLog, setZkLog] = useState([])
   const [flowPopupOpen, setFlowPopupOpen] = useState(false)
   const [flowPopupTitle, setFlowPopupTitle] = useState('Processing request')
+  const [flowAction, setFlowAction] = useState('')
   const [flowTxHash, setFlowTxHash] = useState('')
+  const [flowActionTxHash, setFlowActionTxHash] = useState('')
+  const [flowProofTxHash, setFlowProofTxHash] = useState('')
   const [flowWalletAddress, setFlowWalletAddress] = useState('')
   const [pendingProofRegistration, setPendingProofRegistration] = useState(null)
   const [claimState, setClaimState] = useState('idle') // 'idle' | 'loading' | 'done' | 'error'
@@ -407,6 +509,7 @@ export default function Help() {
   const [openRequests, setOpenRequests] = useState([])
   const [selectedRequest, setSelectedRequest] = useState(null)
   const [offerSubmitting, setOfferSubmitting] = useState(false)
+  const [lastOfferReceipt, setLastOfferReceipt] = useState(null)
 
   const [walletAddress, setWalletAddress] = useState('')
   const activeWalletAddress = walletAddress
@@ -428,9 +531,12 @@ export default function Help() {
     setZkLog([])
   }
 
-  function startFlowPopup(title, walletAddress = activeWalletAddress) {
+  function startFlowPopup(title, walletAddress = activeWalletAddress, action = '') {
     setFlowPopupTitle(title)
+    setFlowAction(action)
     setFlowTxHash('')
+    setFlowActionTxHash('')
+    setFlowProofTxHash('')
     setFlowWalletAddress(walletAddress || '')
     setFlowPopupOpen(true)
   }
@@ -724,7 +830,7 @@ export default function Help() {
 
   async function handleGenerateProof() {
     if (!location || !isWalletConnected || !activeWalletAddress) return
-    startFlowPopup('Generating location proof', activeWalletAddress)
+    startFlowPopup('Generating location proof', activeWalletAddress, 'location_proof')
     clearZkLog()
     appendZkLog('Starting ZK proof')
     setZkState('loading')
@@ -783,6 +889,9 @@ export default function Help() {
   async function runProofAfterRegistration(action, txHash, walletAddress, pinnedLocation = location) {
     if (!pinnedLocation || !walletAddress) return
     const locationSnapshot = [pinnedLocation[0], pinnedLocation[1]]
+    setFlowAction(action)
+    setFlowActionTxHash(txHash || '')
+    if (txHash) setFlowTxHash(txHash)
     setPendingProofRegistration({ action, txHash, walletAddress, location: locationSnapshot })
     appendZkLog('On-chain registration is done')
     appendZkLog('Starting ZK proof in the background')
@@ -803,7 +912,9 @@ export default function Help() {
       appendZkLog('Recording ZK proof checkpoint on Stellar')
       const verification = await recordExpertVerification(`${action}_zk_proof`, txHash, result?.nullifier || '', walletAddress)
       if (verification?.verificationTxHash || verification?.hash) {
-        setFlowTxHash(verification.verificationTxHash || verification.hash)
+        const proofTx = verification.verificationTxHash || verification.hash
+        setFlowTxHash(proofTx)
+        setFlowProofTxHash(proofTx)
         appendZkLog('ZK proof registered on Stellar')
         setPendingProofRegistration(null)
       } else {
@@ -825,6 +936,9 @@ export default function Help() {
     }
     clearZkLog()
     setFlowPopupTitle('Completing ZK checkpoint')
+    setFlowAction(pendingProofRegistration.action || '')
+    setFlowActionTxHash(pendingProofRegistration.txHash || '')
+    setFlowTxHash(pendingProofRegistration.txHash || '')
     setFlowWalletAddress(pendingProofRegistration.walletAddress || '')
     setFlowPopupOpen(true)
     void runProofAfterRegistration(
@@ -855,13 +969,19 @@ export default function Help() {
     if (!zkProof || !address) {
       return
     }
-    startFlowPopup('Claiming aid on Stellar', address)
+    startFlowPopup('Claiming aid on Stellar', address, 'aid_claimed')
     setClaimState('loading')
     setClaimError('')
     try {
       const result = await claimAid(address, zkProof.publicInputsBytes, zkProof.proof, StellarWalletsKit)
       setFlowTxHash(result.hash || '')
-      await recordExpertVerification('aid_claimed', result.hash, zkProof?.nullifier || '', address)
+      setFlowActionTxHash(result.hash || '')
+      const verification = await recordExpertVerification('aid_claimed', result.hash, zkProof?.nullifier || '', address)
+      if (verification?.verificationTxHash || verification?.hash) {
+        const proofTx = verification.verificationTxHash || verification.hash
+        setFlowProofTxHash(proofTx)
+        setFlowTxHash(proofTx)
+      }
       setClaimState('done')
     } catch (err) {
       setClaimError(err.message || 'Claim failed')
@@ -910,7 +1030,7 @@ export default function Help() {
       return
     }
     clearZkLog()
-    startFlowPopup('Requesting help', address)
+    startFlowPopup('Requesting help', address, 'request_created')
     setSubmitting(true); setSubmitError('')
     try {
       appendZkLog('Checking Stellar testnet account')
@@ -925,6 +1045,7 @@ export default function Help() {
         StellarWalletsKit
       )
       setFlowTxHash(hash || '')
+      setFlowActionTxHash(hash || '')
       setRequestId(id)
       setRequestStatus('Pending')
       appendZkLog('Request registered on Stellar')
@@ -947,7 +1068,7 @@ export default function Help() {
     setOfferSubmitting(true)
     try {
       clearZkLog()
-      startFlowPopup('Offering help', address)
+      startFlowPopup('Offering help', address, 'aid_offered')
       appendZkLog('Checking Stellar testnet account')
       await ensureAccountFunded(address)
       const eta = Math.round(Math.random() * 480 + 180) // 3–11 min in seconds
@@ -960,7 +1081,15 @@ export default function Help() {
         StellarWalletsKit
       )
       setFlowTxHash(result.hash || '')
+      setFlowActionTxHash(result.hash || '')
       setSelectedRequest(null)
+      setLastOfferReceipt({
+        requestId: req.id,
+        nickname: req.nickname || 'Anonymous',
+        emergencyType: req.emergency_type,
+        txHash: result.hash || '',
+        at: new Date().toISOString(),
+      })
       setOpenRequests(prev => prev.filter(r => r.id !== req.id))
       appendZkLog('Offer registered on Stellar')
       appendZkLog('Opening Stellar Expert checkpoint')
@@ -1228,6 +1357,44 @@ export default function Help() {
                   {openRequests.length === 0 ? 'No one nearby needs help right now.' : `${openRequests.length} active request${openRequests.length > 1 ? 's' : ''} on the map. Tap a pin to help.`}
                 </p>
               </div>
+
+              {lastOfferReceipt && (
+                <div style={{
+                  padding: '12px 13px', borderRadius: '10px', marginBottom: '14px',
+                  background: 'rgba(115,87,255,0.12)', border: '1px solid rgba(115,87,255,0.28)'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#7357FF', flexShrink: 0 }} />
+                    <span style={{ fontSize: '11px', fontWeight: 800, letterSpacing: '1.2px', color: '#B3A6FF' }}>HELP REGISTERED</span>
+                  </div>
+                  <p style={{ margin: '0 0 9px', fontSize: '12px', color: 'rgba(242,236,220,0.52)', lineHeight: 1.45 }}>
+                    You are helping {lastOfferReceipt.nickname}. This receipt is public and checkable on Stellar.
+                  </p>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <a
+                      href={stellarExpertTxUrl(flowProofTxHash || lastOfferReceipt.txHash) || stellarExpertAccountUrl(activeWalletAddress)}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{
+                        flex: 1, padding: '8px 10px', borderRadius: '8px',
+                        background: '#7357FF', color: '#fff', textDecoration: 'none',
+                        fontSize: '11px', fontWeight: 800, textAlign: 'center'
+                      }}
+                    >
+                      View receipt
+                    </a>
+                    {pendingProofRegistration?.action === 'aid_offered' && zkState === 'error' && (
+                      <button onClick={retryPendingProofRegistration} style={{
+                        padding: '8px 10px', borderRadius: '8px', border: '1px solid rgba(255,122,107,0.25)',
+                        background: 'rgba(255,122,107,0.12)', color: '#FF7A6B',
+                        fontSize: '11px', fontWeight: 800, cursor: 'pointer'
+                      }}>
+                        Retry ZK
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
 
               <div style={S.divider} />
 
@@ -1624,12 +1791,15 @@ export default function Help() {
           onClose={() => setFlowPopupOpen(false)}
           title={flowPopupTitle}
           accentColor={accentColor}
+          receiptAction={flowAction}
           location={location}
           profile={profile}
           walletAddress={flowWalletAddress || activeWalletAddress}
           entries={zkLog}
           active={submitting || offerSubmitting || claimState === 'loading' || zkState === 'loading'}
-          txHash={flowTxHash || activeExpertRecord?.lastTxHash || ''}
+          txHash={flowProofTxHash || flowTxHash || activeExpertRecord?.lastTxHash || ''}
+          actionTxHash={flowActionTxHash || activeExpertRecord?.actionTxHash || ''}
+          proofTxHash={flowProofTxHash || activeExpertRecord?.verificationTxHash || ''}
           error={submitError || zkError || claimError || ''}
           canRetryProof={Boolean(pendingProofRegistration) && zkState === 'error'}
           onRetryProof={retryPendingProofRegistration}
@@ -1650,17 +1820,17 @@ export default function Help() {
                   VERIFIED CHECKPOINT
                 </div>
                 <h3 style={{ margin: 0, fontSize: '24px', lineHeight: 1.1, color: '#F4ECDC' }}>
-                  Stellar Expert
+                  {receiptCopy(activeExpertRecord.lastAction).title}
                 </h3>
                 <p style={{ margin: '8px 0 0', fontSize: '13px', lineHeight: 1.5, color: 'rgba(242,236,220,0.62)' }}>
-                  Tu wallet y la accion on-chain quedaron registradas. El ZK proof se agrega cuando termina.
+                  {receiptCopy(activeExpertRecord.lastAction).body}
                 </p>
               </div>
               <div style={{ padding: '18px 22px 22px' }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '16px' }}>
                   {[
                     ['Wallet', activeExpertRecord.walletAddress ? `${activeExpertRecord.walletAddress.slice(0, 8)}...${activeExpertRecord.walletAddress.slice(-6)}` : 'Unknown'],
-                    ['Action', activeExpertRecord.lastAction || 'none'],
+                    ['Action', actionLabel(activeExpertRecord.lastAction)],
                     ['Network', activeExpertRecord.network || 'testnet'],
                     ['Time', activeExpertRecord.verifiedAt ? new Date(activeExpertRecord.verifiedAt).toLocaleString() : 'n/a'],
                   ].map(([label, value]) => (
@@ -1673,13 +1843,56 @@ export default function Help() {
 
                 <div style={{ marginBottom: '16px' }}>
                   <div style={{ fontSize: '10px', letterSpacing: '1.4px', fontWeight: 700, color: 'rgba(242,236,220,0.3)', marginBottom: '8px' }}>
+                    COMPROBACION
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                    <div style={{ padding: '10px 12px', borderRadius: '10px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)', minWidth: 0 }}>
+                      <div style={{ fontSize: '9px', letterSpacing: '1px', color: 'rgba(242,236,220,0.32)', marginBottom: '5px' }}>ACTION TX</div>
+                      {activeExpertRecord.actionTxHash || activeExpertRecord.lastTxHash ? (
+                        <a
+                          href={stellarExpertTxUrl(activeExpertRecord.actionTxHash || activeExpertRecord.lastTxHash)}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ fontSize: '11px', color: '#7fb8ba', textDecoration: 'none', wordBreak: 'break-all' }}
+                        >
+                          {shortHash(activeExpertRecord.actionTxHash || activeExpertRecord.lastTxHash)}
+                        </a>
+                      ) : (
+                        <div style={{ fontSize: '11px', color: 'rgba(242,236,220,0.34)' }}>Not available</div>
+                      )}
+                    </div>
+                    <div style={{
+                      padding: '10px 12px', borderRadius: '10px',
+                      background: activeExpertRecord.verificationTxHash ? 'rgba(63,132,135,0.1)' : 'rgba(255,255,255,0.04)',
+                      border: `1px solid ${activeExpertRecord.verificationTxHash ? 'rgba(63,132,135,0.25)' : 'rgba(255,255,255,0.06)'}`,
+                      minWidth: 0
+                    }}>
+                      <div style={{ fontSize: '9px', letterSpacing: '1px', color: 'rgba(242,236,220,0.32)', marginBottom: '5px' }}>ZK TX</div>
+                      {activeExpertRecord.verificationTxHash ? (
+                        <a
+                          href={stellarExpertTxUrl(activeExpertRecord.verificationTxHash)}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ fontSize: '11px', color: '#7fb8ba', textDecoration: 'none', wordBreak: 'break-all' }}
+                        >
+                          {shortHash(activeExpertRecord.verificationTxHash)}
+                        </a>
+                      ) : (
+                        <div style={{ fontSize: '11px', color: 'rgba(242,236,220,0.34)' }}>Pending</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ marginBottom: '16px' }}>
+                  <div style={{ fontSize: '10px', letterSpacing: '1.4px', fontWeight: 700, color: 'rgba(242,236,220,0.3)', marginBottom: '8px' }}>
                     REGISTRO
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                     {(activeExpertRecord.history || []).slice().reverse().map((item, index) => (
                       <div key={`${item.at}-${index}`} style={{ padding: '8px 10px', borderRadius: '10px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center' }}>
-                          <div style={{ fontSize: '12px', color: '#F4ECDC' }}>{item.action}</div>
+                          <div style={{ fontSize: '12px', color: '#F4ECDC' }}>{actionLabel(item.action)}</div>
                           <div style={{ fontSize: '10px', color: 'rgba(242,236,220,0.28)' }}>{new Date(item.at).toLocaleTimeString()}</div>
                         </div>
                         {item.txHash && (
@@ -1689,7 +1902,7 @@ export default function Help() {
                             rel="noreferrer"
                             style={{ display: 'block', fontSize: '10px', color: 'rgba(63,132,135,0.82)', marginTop: '4px', wordBreak: 'break-all', textDecoration: 'none' }}
                           >
-                            {item.proofFingerprint ? 'zk tx' : 'tx'} {item.txHash}
+                            {item.proofFingerprint ? 'zk tx' : 'tx'} {shortHash(item.txHash)}
                           </a>
                         )}
                       </div>
@@ -1699,7 +1912,7 @@ export default function Help() {
 
                 <div style={{ display: 'flex', gap: '8px' }}>
                   <a
-                    href={stellarExpertTxUrl(activeExpertRecord.verificationTxHash || activeExpertRecord.lastTxHash) || stellarExpertAccountUrl(activeExpertRecord.walletAddress)}
+                    href={stellarExpertTxUrl(activeExpertRecord.verificationTxHash || activeExpertRecord.actionTxHash || activeExpertRecord.lastTxHash) || stellarExpertAccountUrl(activeExpertRecord.walletAddress)}
                     target="_blank"
                     rel="noreferrer"
                     style={{
