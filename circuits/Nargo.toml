@@ -1,0 +1,7 @@
+[package]
+name = "aegis"
+type = "bin"
+authors = ["HelPhone"]
+compiler_version = ">=0.39.0"
+
+[dependencies]

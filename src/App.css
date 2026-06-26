@@ -80,3 +80,16 @@ body {
     right: 0;
   }
 }
+
+/* Mapbox overrides — HelPhone palette */
+.mapboxgl-popup-content {
+  background: #234B4E;
+  color: rgba(242, 236, 220, 0.92);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  padding: 0;
+}
+.mapboxgl-popup-tip {
+  border-top-color: #234B4E;
+}

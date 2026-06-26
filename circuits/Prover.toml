@@ -1,0 +1,24 @@
+# Test inputs — usuario dentro de una zona en Buenos Aires (La Boca)
+#
+# Coordenadas reales:  lat -34.6344, lon -58.3636
+# Encoding:
+#   user_x = floor(-58.3636 × 1e7) + 1_800_000_000 = -583_636_000 + 1_800_000_000 = 1_216_364_000
+#   user_y = floor(-34.6344 × 1e7) +   900_000_000 = -346_344_000 +   900_000_000 =   553_656_000
+#
+# Zona (aprox. 1 km × 1 km alrededor del punto):
+#   box_x: lon [-58.4136, -58.3136]  →  [1_215_864_000, 1_216_864_000]
+#   box_y: lat [-34.6844, -34.5844]  →  [  553_156_000,   554_156_000]
+
+user_x = "1216364000"
+user_y = "553656000"
+secret_id = "0x0000000000000000000000000000000000000000000000000000000000001337"
+
+box_x_min = "1215864000"
+box_x_max = "1216864000"
+box_y_min = "553156000"
+box_y_max = "554156000"
+campaign_id = "1"
+
+# Dirección Stellar representada como entero (32 bytes del decoded StrKey → Field)
+# En producción: strkey_decode(address)[2..] como u256 → Field
+recipient_address = "0x000000000000000000000000000000000000000000000000000000000000CAFE"

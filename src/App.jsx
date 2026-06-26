@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { Link } from 'react-router-dom'
 import './App.css'
 
 export default function App() {
@@ -125,7 +126,7 @@ export default function App() {
       {/* NAVBAR */}
       <nav style={{
         position: 'fixed',
-        top: '20px',
+        top: '18px',
         left: '50%',
         transform: 'translateX(-50%)',
         zIndex: 60,
@@ -133,37 +134,64 @@ export default function App() {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        padding: '11px 14px 11px 22px',
-        borderRadius: '18px',
-        background: 'rgba(18, 28, 20, 0.52)',
-        backdropFilter: 'blur(26px) saturate(1.5)',
-        border: '1px solid rgba(255, 255, 255, 0.11)',
-        boxShadow: '0 10px 40px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.09)'
+        padding: '10px 12px 10px 22px',
+        borderRadius: '16px',
+        background: 'rgba(18, 28, 20, 0.68)',
+        backdropFilter: 'blur(28px) saturate(1.4)',
+        border: '1px solid rgba(255, 255, 255, 0.08)',
+        boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)'
       }}>
-        <a href="#top" style={{ display: 'flex', alignItems: 'center', textDecoration: 'none' }}>
-          <span style={{ fontFamily: "'Instrument Serif', serif", fontSize: '22px', letterSpacing: '0.3px', color: '#F4ECDC', fontStyle: 'italic' }}>Hel</span>
-          <span style={{ fontFamily: "'Instrument Serif', serif", fontSize: '22px', letterSpacing: '0.3px', color: '#a2a586' }}>Phone</span>
+        <a href="#top" style={{ display: 'flex', alignItems: 'center', textDecoration: 'none', gap: '1px' }}>
+          <span style={{ fontFamily: "'Instrument Serif', serif", fontSize: '21px', letterSpacing: '0.2px', color: '#F4ECDC', fontStyle: 'italic' }}>Hel</span>
+          <span style={{ fontFamily: "'Instrument Serif', serif", fontSize: '21px', letterSpacing: '0.2px', color: '#a2a586' }}>Phone</span>
         </a>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '28px' }}>
-          <a href="#how" style={{ textDecoration: 'none', color: 'rgba(242, 236, 220, 0.8)', fontSize: '14px', fontWeight: '500' }}>How it works</a>
-          <a href="#trust" style={{ textDecoration: 'none', color: 'rgba(242, 236, 220, 0.8)', fontSize: '14px', fontWeight: '500' }}>Trust</a>
-          <a href="#coverage" style={{ textDecoration: 'none', color: 'rgba(242, 236, 220, 0.8)', fontSize: '14px', fontWeight: '500' }}>Coverage</a>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          {[
+            { href: '#how', label: 'How it works' },
+            { href: '#trust', label: 'Trust & Safety' },
+            { href: '#coverage', label: 'Coverage' },
+            { to: '/ranking', label: 'Ranking', internal: true },
+          ].map(link => link.internal ? (
+            <Link key={link.label} to={link.to} style={{
+              textDecoration: 'none', color: 'rgba(242, 236, 220, 0.65)', fontSize: '13.5px', fontWeight: '500',
+              padding: '7px 12px', borderRadius: '8px', transition: 'all 0.15s'
+            }}
+              onMouseEnter={e => { e.target.style.background = 'rgba(255,255,255,0.06)'; e.target.style.color = 'rgba(242,236,220,0.9)' }}
+              onMouseLeave={e => { e.target.style.background = 'transparent'; e.target.style.color = 'rgba(242,236,220,0.65)' }}>
+              {link.label}
+            </Link>
+          ) : (
+            <a key={link.label} href={link.href} style={{
+              textDecoration: 'none', color: 'rgba(242, 236, 220, 0.65)', fontSize: '13.5px', fontWeight: '500',
+              padding: '7px 12px', borderRadius: '8px', transition: 'all 0.15s'
+            }}
+              onMouseEnter={e => { e.target.style.background = 'rgba(255,255,255,0.06)'; e.target.style.color = 'rgba(242,236,220,0.9)' }}
+              onMouseLeave={e => { e.target.style.background = 'transparent'; e.target.style.color = 'rgba(242,236,220,0.65)' }}>
+              {link.label}
+            </a>
+          ))}
+          <Link to="/help" style={{
+            textDecoration: 'none',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '6px',
+            color: '#fff',
+            fontWeight: '600',
+            fontSize: '13.5px',
+            padding: '8px 16px',
+            borderRadius: '10px',
+            background: '#FF7A6B',
+            marginLeft: '6px',
+            transition: 'all 0.15s'
+          }}
+            onMouseEnter={e => { e.target.style.background = '#ff6b5a'; e.target.style.boxShadow = '0 4px 16px rgba(255,122,107,0.4)' }}
+            onMouseLeave={e => { e.target.style.background = '#FF7A6B'; e.target.style.boxShadow = 'none' }}>
+            Request Help
+          </Link>
         </div>
-        <a href="#cta" style={{
-          textDecoration: 'none',
-          whiteSpace: 'nowrap',
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: '7px',
-          color: '#fff',
-          fontWeight: '600',
-          fontSize: '14px',
-          padding: '10px 18px',
-          borderRadius: '11px',
-          boxShadow: '0 8px 20px -10px rgba(255, 122, 107, 0.9)',
-          backgroundColor: '#a2a586'
-        }}>Request Help</a>
       </nav>
+
+
 
       {/* HERO */}
       <header id="top" style={{
@@ -247,7 +275,7 @@ export default function App() {
                 gap: '14px',
                 flexWrap: 'wrap'
               }}>
-                <a href="#cta" style={{
+                <Link to="/help" style={{
                   textDecoration: 'none',
                   display: 'inline-flex',
                   alignItems: 'center',
@@ -258,10 +286,10 @@ export default function App() {
                   padding: '16px 30px',
                   borderRadius: '13px',
                   boxShadow: '0 16px 40px -16px rgba(255, 122, 107, 0.95)',
-                  backgroundColor: '#a2a586'
+                  backgroundColor: '#FF7A6B'
                 }}>
                   Get Help <span style={{ fontSize: '18px', lineHeight: 0 }}>→</span>
-                </a>
+                </Link>
                 <a href="#community" style={{
                   textDecoration: 'none',
                   display: 'inline-flex',
