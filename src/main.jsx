@@ -9,8 +9,30 @@ import Help from './pages/Help.jsx'
 import Ranking from './pages/Ranking.jsx'
 import './App.css'
 
+const WALLET_ICON_PATHS = {
+  albedo: '/assets/wallets/albedo.png',
+  freighter: '/assets/wallets/freighter.png',
+  fordefi: '/assets/wallets/fordefi.png',
+  rabet: '/assets/wallets/rabet.png',
+  xbull: '/assets/wallets/xbull.png',
+  lobstr: '/assets/wallets/lobstr.png',
+  hana: '/assets/wallets/hana.png',
+  klever: '/assets/wallets/klever.png',
+  onekey: '/assets/wallets/onekey.png',
+  BitgetWallet: '/assets/wallets/bitget.png',
+  cactuslink: '/assets/wallets/cactuslink.png',
+}
+
+function helphoneWalletModules() {
+  return defaultModules().map((module) => {
+    const iconPath = WALLET_ICON_PATHS[module.productId]
+    if (iconPath) module.productIcon = iconPath
+    return module
+  })
+}
+
 StellarWalletsKit.init({
-  modules: defaultModules(),
+  modules: helphoneWalletModules(),
   network: Networks.TESTNET,
   theme: {
     ...SwkAppDarkTheme,

@@ -11,8 +11,14 @@ export default defineConfig({
     open: true,
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'require-corp',
+      'Cross-Origin-Embedder-Policy': 'credentialless',
     }
+  },
+  preview: {
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'credentialless',
+    },
   },
   optimizeDeps: {
     exclude: ['@noir-lang/noir_js', '@noir-lang/backend_barretenberg', '@noir-lang/acvm_js', '@noir-lang/noirc_abi']
