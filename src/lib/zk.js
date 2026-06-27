@@ -1,11 +1,10 @@
-import { Noir } from '@noir-lang/noir_js'
-import { Buffer } from 'buffer'
 import { StrKey } from '@stellar/stellar-sdk'
-import circuit from '../../circuits/target/aegis.json'
 
 let _noir = null
 let _backend = null
+let _Noir = null
 let _UltraHonkBackend = null
+let _circuitArtifact = null
 let _proofLock = null
 
 const PROVER_INIT_TIMEOUT_MS = 2 * 60 * 1000
@@ -54,14 +53,18 @@ export function decodeBase64Utf8(input, label) {
   return new TextDecoder().decode(decodeBase64Bytes(input, label))
 }
 
-function getCircuitArtifact() {
-  return {
+async function getCircuitArtifact() {
+  if (_circuitArtifact) return _circuitArtifact
+  const circuitModule = await import('../../circuits/target/aegis.json')
+  const circuit = circuitModule.default || circuitModule
+  _circuitArtifact = {
     ...circuit,
     bytecode: normalizeBase64(circuit.bytecode, 'ZK circuit bytecode'),
     debug_symbols: circuit.debug_symbols
       ? normalizeBase64(circuit.debug_symbols, 'ZK circuit debug symbols')
       : circuit.debug_symbols,
   }
+  return _circuitArtifact
 }
 
 function createBarretenbergLogger(onLog) {
@@ -144,18 +147,22 @@ function getThreadCount() {
 async function init(onLog = () => {}) {
   if (_noir && _backend) return
   if (typeof globalThis.Buffer === 'undefined') {
+    const { Buffer } = await import('buffer')
     globalThis.Buffer = Buffer
+  }
+  if (!_Noir) {
+    ;({ Noir: _Noir } = await import('@noir-lang/noir_js'))
   }
   if (!_UltraHonkBackend) {
     ;({ UltraHonkBackend: _UltraHonkBackend } = await import('@aztec/bb.js'))
   }
-  const artifact = getCircuitArtifact()
+  const artifact = await getCircuitArtifact()
   _backend = new _UltraHonkBackend(
     artifact.bytecode,
     { threads: getThreadCount(), logger: createBarretenbergLogger(onLog) },
     { recursive: false }
   )
-  _noir = new Noir(artifact)
+  _noir = new _Noir(artifact)
 }
 
 export async function warmProver(onLog = () => {}) {

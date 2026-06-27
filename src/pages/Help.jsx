@@ -212,6 +212,20 @@ function shortHash(hash = '') {
   return hash ? `${hash.slice(0, 10)}...${hash.slice(-8)}` : ''
 }
 
+function proofFailureSummary(message = '') {
+  const text = String(message || 'Proof generation failed').trim()
+  if (/local zk prover server is unreachable/i.test(text)) {
+    return 'Local ZK prover is unreachable. Restart with npm run dev and press Retry ZK.'
+  }
+  if (/start the app with npm run dev/i.test(text)) {
+    return 'Local ZK prover is not running. Restart with npm run dev and press Retry ZK.'
+  }
+  if (/wallet/i.test(text) && /valid|connect|reconnect/i.test(text)) {
+    return 'Reconnect a valid Stellar wallet and press Retry ZK.'
+  }
+  return text.length > 220 ? `${text.slice(0, 217)}...` : text
+}
+
 function receiptTxHash(record) {
   return record?.verificationTxHash || record?.actionTxHash || record?.lastTxHash || ''
 }
@@ -725,7 +739,7 @@ export default function Help() {
     setZkLog(prev => {
       const repeatedRecently = prev.some(entry => entry.message === message && ts - (entry.ts || 0) < 1500)
       if (repeatedRecently) return prev
-      return [...prev, { id: `${ts}-${prev.length}`, at, message, ts }].slice(-8)
+      return [...prev, { id: `${ts}-${prev.length}`, at, message, ts }].slice(-14)
     })
   }
 
@@ -819,8 +833,9 @@ export default function Help() {
       setExpertRecord(merged)
       return { ...verificationResult, verificationTxHash, actionTxHash }
     } catch (err) {
-      console.warn('On-chain expert verification write failed:', err?.message || err)
-      return null
+      const message = err?.message || 'On-chain expert verification write failed'
+      console.warn('On-chain expert verification write failed:', message)
+      return { error: message, verificationTxHash: '', actionTxHash }
     }
   }
 
@@ -1048,9 +1063,10 @@ export default function Help() {
       setZkState('done')
       appendZkLog('ZK proof ready')
     } catch (err) {
-      setZkError(err.message || 'Proof generation failed')
+      const message = proofFailureSummary(err.message)
+      setZkError(message)
       setZkState('error')
-      appendZkLog('Proof generation failed')
+      appendZkLog(`Proof generation failed: ${message}`)
     }
   }
 
@@ -1078,10 +1094,10 @@ export default function Help() {
       appendZkLog('ZK proof ready')
       return result
     } catch (err) {
-      const message = err.message || 'Proof generation failed'
+      const message = proofFailureSummary(err.message)
       setZkError(message)
       setZkState('error')
-      appendZkLog('Proof generation failed')
+      appendZkLog(`Proof generation failed: ${message}`)
       throw new Error(message)
     }
   }
@@ -1117,14 +1133,17 @@ export default function Help() {
         setFlowProofTxHash(proofTx)
         appendZkLog('ZK proof registered on Stellar')
         setPendingProofRegistration(null)
+      } else if (verification?.error) {
+        throw new Error(`ZK checkpoint transaction failed: ${verification.error}`)
       } else {
         throw new Error('ZK proof was generated, but the Stellar checkpoint transaction was not confirmed.')
       }
     } catch (err) {
-      const message = err.message || 'Proof generation failed'
+      const message = proofFailureSummary(err.message)
       setZkError(`The help action is already registered. ZK proof is pending: ${message}`)
       setZkState('error')
-      appendZkLog('Help is registered; ZK proof can be retried later')
+      appendZkLog(`ZK checkpoint pending: ${message}`)
+      appendZkLog('Help is registered on Stellar; press Retry ZK to finish the checkpoint')
     }
   }
 
@@ -1249,7 +1268,7 @@ export default function Help() {
       setRequestId(id)
       setRequestStatus('Pending')
       appendZkLog('Request registered on Stellar')
-      appendZkLog('Opening Stellar Expert checkpoint')
+      appendZkLog('Action receipt is available on Stellar Expert')
       recordLocalExpertCheckpoint('request_created', hash, address)
       void runProofAfterRegistration('request_created', hash, address, [...location])
     } catch (err) {
@@ -1292,7 +1311,7 @@ export default function Help() {
       })
       setOpenRequests(prev => prev.filter(r => r.id !== req.id))
       appendZkLog('Offer registered on Stellar')
-      appendZkLog('Opening Stellar Expert checkpoint')
+      appendZkLog('Action receipt is available on Stellar Expert')
       recordLocalExpertCheckpoint('aid_offered', result.hash, address)
       void runProofAfterRegistration('aid_offered', result.hash, address, [...location])
     } catch (err) {

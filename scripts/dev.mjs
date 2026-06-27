@@ -48,4 +48,7 @@ process.on('SIGTERM', () => shutdown(0))
 run('prover', 'node', ['server/index.js'], {
   PORT: process.env.ZK_PROVER_PORT || '3001',
 })
-run('vite', 'vite', ['--host', '127.0.0.1'])
+run('vite', 'vite', ['--host', '127.0.0.1'], {
+  VITE_ZK_PROVER_URL: process.env.VITE_ZK_PROVER_URL || '/zk',
+  VITE_ZK_BROWSER_FALLBACK: process.env.VITE_ZK_BROWSER_FALLBACK || 'false',
+})
