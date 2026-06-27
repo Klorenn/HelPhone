@@ -278,7 +278,7 @@ function HelpOnboardingModal({ open, onClose, onConnectWallet }) {
     {
       label: 'ZK',
       title: 'ZK proof protects your privacy',
-      body: 'A zero-knowledge proof confirms you\'re really at your location without revealing your exact coordinates. It runs in your browser and gets attached as a checkpoint after the on-chain action.',
+      body: 'A zero-knowledge proof confirms you\'re really at your location without revealing your exact coordinates. The local prover creates it and attaches it as a checkpoint after the on-chain action.',
     },
     {
       label: 'Wallet',
@@ -721,7 +721,12 @@ export default function Help() {
 
   function appendZkLog(message) {
     const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    setZkLog(prev => [...prev, { id: `${Date.now()}-${prev.length}`, at, message }].slice(-8))
+    const ts = Date.now()
+    setZkLog(prev => {
+      const repeatedRecently = prev.some(entry => entry.message === message && ts - (entry.ts || 0) < 1500)
+      if (repeatedRecently) return prev
+      return [...prev, { id: `${ts}-${prev.length}`, at, message, ts }].slice(-8)
+    })
   }
 
   function clearZkLog() {
@@ -978,19 +983,6 @@ export default function Help() {
       clearTimeout(timeout)
     }
   }, [searchQuery])
-
-  // Pre-warm ZK prover on mount
-  useEffect(() => {
-    let cancelled = false
-    async function prewarm() {
-      try {
-        const { warmProver } = await import('../lib/zk.js')
-        if (!cancelled) await warmProver()
-      } catch {}
-    }
-    prewarm()
-    return () => { cancelled = true }
-  }, [])
 
   // Auto-request location on mount
   useEffect(() => { requestLocation() }, [])

@@ -6,9 +6,12 @@ import circuit from '../../circuits/target/aegis.json'
 let _noir = null
 let _backend = null
 let _UltraHonkBackend = null
+let _proofLock = null
 
 const PROVER_INIT_TIMEOUT_MS = 2 * 60 * 1000
 const PROOF_TIMEOUT_MS = 5 * 60 * 1000
+const SERVER_HEALTH_TIMEOUT_MS = 2500
+const SERVER_PROOF_TIMEOUT_MS = 10 * 60 * 1000
 
 function normalizeBase64(input, label = 'Base64 value') {
   if (typeof input !== 'string') {
@@ -127,9 +130,15 @@ async function runWithProgress(label, task, {
 async function resetBackend() {
   const backend = _backend
   _backend = null
+  _proofLock = null
   if (backend && typeof backend.destroy === 'function') {
     try { await backend.destroy() } catch (_) {}
   }
+}
+
+function getThreadCount() {
+  const available = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency : 4
+  return Math.max(1, Math.min(available, 8))
 }
 
 async function init(onLog = () => {}) {
@@ -143,10 +152,22 @@ async function init(onLog = () => {}) {
   const artifact = getCircuitArtifact()
   _backend = new _UltraHonkBackend(
     artifact.bytecode,
-    { threads: 1, logger: createBarretenbergLogger(onLog) },
+    { threads: getThreadCount(), logger: createBarretenbergLogger(onLog) },
     { recursive: false }
   )
   _noir = new Noir(artifact)
+}
+
+export async function warmProver(onLog = () => {}) {
+  if (isProverReady()) return
+  await init(onLog)
+  onLog('Downloading CRS (cached after first run)')
+  await _backend.instantiate()
+  onLog('Prover ready')
+}
+
+export function isProverReady() {
+  return _backend !== null && _noir !== null && _proofLock === null && _backend && typeof _backend.generateProof === 'function'
 }
 
 // BN254 scalar field prime
@@ -210,13 +231,140 @@ function buildCampaignPrefix(publicInputsBytes) {
 }
 
 /**
- * Generate a ZK location proof in-browser via UltraHonk.
- * Takes ~30–60s on first call (WASM init + proving).
+ * Generate a ZK location proof through the local prover server.
+ * Browser proving is available only when VITE_ZK_BROWSER_FALLBACK=true.
  *
  * @param {{ lat: number, lng: number, campaignId?: string, recipientAddress: string }} opts
  * @returns {{ proof: Uint8Array, publicInputsBytes: Uint8Array, nullifier: string }}
  */
 export async function generateLocationProof({ lat, lng, campaignId = '1', recipientAddress, onLog = () => {} }) {
+  const proverUrl = (import.meta.env.VITE_ZK_PROVER_URL || '/zk').replace(/\/$/, '')
+  const allowBrowserFallback = import.meta.env.VITE_ZK_BROWSER_FALLBACK === 'true'
+
+  if (proverUrl) {
+    try {
+      return await _requestServerProof({ lat, lng, campaignId, recipientAddress, onLog, proverUrl })
+    } catch (err) {
+      if (!allowBrowserFallback) {
+        onLog('ZK prover server is not available')
+        throw new Error(`${err.message}. Start the app with npm run dev so the local prover server is running.`)
+      }
+      onLog(`Server prover: ${err.message}. Falling back to browser because VITE_ZK_BROWSER_FALLBACK=true.`)
+    }
+  }
+
+  if (_proofLock) {
+    onLog('Proof already in progress — waiting for it to complete')
+    return _proofLock
+  }
+
+  _proofLock = _browserProof({ lat, lng, campaignId, recipientAddress, onLog })
+
+  try {
+    return await _proofLock
+  } finally {
+    _proofLock = null
+  }
+}
+
+async function _requestServerProof({ lat, lng, campaignId = '1', recipientAddress, onLog = () => {}, proverUrl }) {
+  onLog('Checking local ZK prover server')
+  await _checkServerProver(proverUrl, onLog)
+  onLog('Requesting proof from local prover server')
+  const secretId = getOrCreateSecret()
+  const recipientField = addressToField(recipientAddress)
+
+  const inputs = {
+    user_x:            encodeLng(lng),
+    user_y:            encodeLat(lat),
+    secret_id:         secretId,
+    box_x_min:         '0',
+    box_x_max:         '3600000000',
+    box_y_min:         '0',
+    box_y_max:         '1800000000',
+    campaign_id:       campaignId,
+    recipient_address: recipientField,
+  }
+
+  const res = await fetchWithTimeout(proverEndpoint(proverUrl, '/prove'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ inputs }),
+  }, SERVER_PROOF_TIMEOUT_MS)
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}))
+    throw new Error(errBody.error || `Server returned ${res.status}`)
+  }
+  const data = await res.json()
+  if (!data.success) throw new Error(data.error || 'Server prover failed')
+
+  const proof = hexToUint8Array(data.proof)
+  const nullifier = data.nullifier
+  const publicInputsBytes = buildPublicInputsBytes(
+    inputs.box_x_min, inputs.box_x_max, inputs.box_y_min, inputs.box_y_max,
+    campaignId, recipientField, nullifier
+  )
+
+  onLog('Proof received from server')
+  return {
+    proof,
+    publicInputsBytes,
+    publicInputsPrefix: buildCampaignPrefix(publicInputsBytes),
+    nullifier,
+  }
+}
+
+async function _checkServerProver(proverUrl, onLog) {
+  let res
+  try {
+    res = await fetchWithTimeout(proverEndpoint(proverUrl, '/health'), { cache: 'no-store' }, SERVER_HEALTH_TIMEOUT_MS)
+  } catch {
+    throw new Error('Local ZK prover server is unreachable')
+  }
+
+  if (!res.ok) {
+    throw new Error(`Local ZK prover health check returned ${res.status}`)
+  }
+
+  const data = await res.json().catch(() => ({}))
+  if (data.ready) {
+    onLog('Local ZK prover is ready')
+  } else {
+    onLog('Local ZK prover is warming up; first run downloads CRS once')
+  }
+}
+
+function proverEndpoint(proverUrl, path) {
+  if (proverUrl.endsWith('/zk')) return `${proverUrl}${path}`
+  return `${proverUrl}/zk${path}`
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`)
+    }
+    throw err
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+function hexToUint8Array(hex) {
+  if (typeof hex !== 'string') throw new Error('expected hex string')
+  const clean = hex.startsWith('0x') ? hex.slice(2) : hex
+  const bytes = new Uint8Array(clean.length / 2)
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)
+  }
+  return bytes
+}
+
+async function _browserProof({ lat, lng, campaignId = '1', recipientAddress, onLog = () => {} }) {
   onLog('Loading ZK circuit artifacts')
   await init(onLog)
 
@@ -250,14 +398,14 @@ export async function generateLocationProof({ lat, lng, campaignId = '1', recipi
   onLog('Executing Noir circuit witness')
   const { witness, returnValue } = await _noir.execute(inputs)
 
-  onLog('Preparing Barretenberg prover and CRS')
+  onLog('Preparing Barretenberg prover')
   try {
     await runWithProgress('Barretenberg prover setup', () => _backend.instantiate(), {
       onLog,
       timeoutMs: PROVER_INIT_TIMEOUT_MS,
       firstProgressMs: 7000,
       progressEveryMs: 12000,
-      progressMessage: seconds => `Still preparing prover/CRS (${seconds}s). First run downloads and caches CRS data.`,
+      progressMessage: seconds => `Still preparing prover (${seconds}s). First run downloads and caches CRS data.`,
     })
   } catch (err) {
     await resetBackend()
