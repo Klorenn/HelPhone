@@ -93,3 +93,57 @@ body {
 .mapboxgl-popup-tip {
   border-top-color: #234B4E;
 }
+
+/* Stellar Wallets Kit modal — HelPhone polish */
+.stellar-wallets-kit {
+  color-scheme: dark;
+}
+
+.stellar-wallets-kit > section {
+  width: min(92vw, 390px) !important;
+  max-width: min(92vw, 390px) !important;
+  max-height: min(82vh, 560px) !important;
+  border-radius: 16px !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  background: #1c2c24 !important;
+  box-shadow: 0 24px 72px rgba(0, 0, 0, 0.58) !important;
+}
+
+.stellar-wallets-kit img {
+  width: 32px !important;
+  height: 32px !important;
+  min-width: 32px !important;
+  min-height: 32px !important;
+  max-width: 32px !important;
+  max-height: 32px !important;
+  border-radius: 50% !important;
+  object-fit: contain !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+  font-size: 0 !important;
+  color: transparent !important;
+  overflow: hidden !important;
+}
+
+.stellar-wallets-kit li {
+  min-height: 56px !important;
+  padding: 10px 12px !important;
+}
+
+.stellar-wallets-kit p {
+  font-size: 15px !important;
+  line-height: 1.25 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+.stellar-wallets-kit small {
+  min-height: 34px !important;
+  padding: 7px 10px !important;
+  border-radius: 10px !important;
+  white-space: nowrap !important;
+}
+
+.stellar-wallets-kit button {
+  min-width: 36px !important;
+  min-height: 36px !important;
+}
