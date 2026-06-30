@@ -3,7 +3,7 @@ import {
   nativeToScVal, scValToNative, Networks, BASE_FEE,
 } from '@stellar/stellar-sdk'
 
-const CONTRACT_ID = 'CDKOCBOBOBZOE3WRIQSHRU6Q75VX5UNP7BRBEXCI4QCC5QXQIGUSJZZU'
+const CONTRACT_ID = 'CDP5XZ7UYCGSQBYRDYM2OEAUQJULBZPULSQXK7LGNAJTRXRG3VHZLSHY'
 const RPC_URL = 'https://soroban-testnet.stellar.org'
 const FRIENDBOT_URL = 'https://friendbot.stellar.org'
 const NETWORK = Networks.TESTNET
@@ -51,6 +51,7 @@ function scv(val, opts) {
 }
 
 function mapRequest(raw) {
+  const STATUS = ['Pending', 'Enroute', 'Resolved', 'Cancelled']
   return {
     id: raw.id ? Number(raw.id) : raw.id,
     requester: raw.requester,
@@ -59,7 +60,7 @@ function mapRequest(raw) {
     emergency_type: raw.emergency_type,
     nickname: raw.nickname,
     contact: raw.contact,
-    status: raw.status,
+    status: STATUS[raw.status] ?? (Array.isArray(raw.status) ? raw.status[0] : raw.status),
     created_at: Number(raw.created_at),
     resolved_at: raw.resolved_at ? Number(raw.resolved_at) : null,
   }
@@ -267,7 +268,7 @@ async function sendWrite(rawTx, wallet) {
   for (let i = 0; i < 30; i++) {
     const txResult = await server.getTransaction(hash)
     if (txResult.status === 'SUCCESS') {
-      return txResult
+      return { hash, ...txResult }
     }
     if (txResult.status === 'FAILED') {
       throw new Error('Transaction failed')
@@ -276,6 +277,13 @@ async function sendWrite(rawTx, wallet) {
   }
 
   throw new Error('Transaction timed out')
+}
+
+function guardNaN(val, label) {
+  if (typeof val !== 'number' || !Number.isFinite(val)) {
+    throw new Error(`${label} is invalid (got ${JSON.stringify(val)})`)
+  }
+  return val
 }
 
 export async function createRequest(requester, lat, lng, emergencyType, nickname, contact, wallet) {
@@ -289,8 +297,8 @@ export async function createRequest(requester, lat, lng, emergencyType, nickname
       function: 'create_request',
       args: [
         scv(requester, { type: 'address' }),
-        scv(Math.round(lat * COORD_SCALE), { type: 'i32' }),
-        scv(Math.round(lng * COORD_SCALE), { type: 'i32' }),
+        scv(Math.round(guardNaN(lat, 'lat') * COORD_SCALE), { type: 'i32' }),
+        scv(Math.round(guardNaN(lng, 'lng') * COORD_SCALE), { type: 'i32' }),
         scv(emergencyType, { type: 'string' }),
         scv(nickname, { type: 'string' }),
         scv(contact, { type: 'string' }),
@@ -315,10 +323,10 @@ export async function acceptRequest(responder, requestId, lat, lng, etaSeconds, 
       function: 'accept_request',
       args: [
         scv(responder, { type: 'address' }),
-        scv(Number(requestId), { type: 'u64' }),
-        scv(Math.round(lat * COORD_SCALE), { type: 'i32' }),
-        scv(Math.round(lng * COORD_SCALE), { type: 'i32' }),
-        scv(Number(etaSeconds), { type: 'u32' }),
+        scv(guardNaN(Number(requestId), 'requestId'), { type: 'u64' }),
+        scv(Math.round(guardNaN(lat, 'lat') * COORD_SCALE), { type: 'i32' }),
+        scv(Math.round(guardNaN(lng, 'lng') * COORD_SCALE), { type: 'i32' }),
+        scv(guardNaN(Number(etaSeconds), 'etaSeconds'), { type: 'u32' }),
       ],
     }))
     .setTimeout(30)
@@ -347,6 +355,52 @@ export async function markArrived(responder, requestId, wallet) {
     .build()
 
   await sendWrite(tx, wallet)
+}
+
+let trackingKeypair = null
+let trackingAccount = null
+
+async function getTrackingSigner() {
+  if (trackingKeypair && trackingAccount) return { keypair: trackingKeypair, account: trackingAccount }
+  trackingKeypair = Keypair.random()
+  const addr = trackingKeypair.publicKey()
+  await ensureAccountFunded(addr)
+  trackingAccount = await server.getAccount(addr)
+  return { keypair: trackingKeypair, account: trackingAccount }
+}
+
+export async function updateLocation(responder, requestId, lat, lng) {
+  const { keypair, account } = await getTrackingSigner()
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: NETWORK })
+    .addOperation(Operation.invokeContractFunction({
+      contract: CONTRACT_ID,
+      function: 'update_location',
+      args: [
+        scv(responder, { type: 'address' }),
+        scv(Number(requestId), { type: 'u64' }),
+        scv(Math.round(guardNaN(lat, 'lat') * COORD_SCALE), { type: 'i32' }),
+        scv(Math.round(guardNaN(lng, 'lng') * COORD_SCALE), { type: 'i32' }),
+      ],
+    }))
+    .setTimeout(30)
+    .build()
+
+  const sim = await server.simulateTransaction(tx)
+  const preparedTx = rpc.assembleTransaction(tx, sim, NETWORK).build()
+  preparedTx.sign(keypair)
+  const response = await server.sendTransaction(preparedTx)
+
+  if (response.status === 'ERROR') {
+    throw new Error(response.errorResult?.result?.code || 'Tracking transaction error')
+  }
+
+  const hash = response.hash
+  for (let i = 0; i < 20; i++) {
+    const txResult = await server.getTransaction(hash)
+    if (txResult.status === 'SUCCESS') return
+    if (txResult.status === 'FAILED') throw new Error('Tracking tx failed')
+    await new Promise(r => setTimeout(r, 1000))
+  }
 }
 
 export async function resolveRequest(requester, requestId, wallet) {

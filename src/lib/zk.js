@@ -182,12 +182,85 @@ const FIELD_PRIME = 218882428718392752222464057452572750885483644004160343436982
 
 // stored_lon = floor(lon * 1e7) + 1_800_000_000
 // stored_lat = floor(lat * 1e7) +   900_000_000
+function encodeLngNumber(lng) {
+  return Math.floor(lng * 1e7) + 1_800_000_000
+}
+
+function encodeLatNumber(lat) {
+  return Math.floor(lat * 1e7) + 900_000_000
+}
+
 function encodeLng(lng) {
-  return String(Math.floor(lng * 1e7) + 1_800_000_000)
+  return String(encodeLngNumber(lng))
 }
 
 function encodeLat(lat) {
-  return String(Math.floor(lat * 1e7) + 900_000_000)
+  return String(encodeLatNumber(lat))
+}
+
+function clampInt(value, min, max) {
+  return Math.max(min, Math.min(max, Math.round(value)))
+}
+
+export function buildLocationProofZone({ lat, lng, radiusMeters = 3000 } = {}) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    throw new Error('A valid location is required to build a ZK proof zone.')
+  }
+
+  const safeRadius = Number.isFinite(radiusMeters)
+    ? Math.max(250, Math.min(radiusMeters, 25000))
+    : 3000
+  const latDelta = safeRadius / 111_320
+  const lngScale = Math.max(0.2, Math.cos(lat * Math.PI / 180))
+  const lngDelta = safeRadius / (111_320 * lngScale)
+
+  const boxXMin = clampInt(encodeLngNumber(lng - lngDelta), 0, 3_600_000_000)
+  const boxXMax = clampInt(encodeLngNumber(lng + lngDelta), 0, 3_600_000_000)
+  const boxYMin = clampInt(encodeLatNumber(lat - latDelta), 0, 1_800_000_000)
+  const boxYMax = clampInt(encodeLatNumber(lat + latDelta), 0, 1_800_000_000)
+
+  return {
+    boxXMin: String(boxXMin),
+    boxXMax: String(boxXMax),
+    boxYMin: String(boxYMin),
+    boxYMax: String(boxYMax),
+    radiusMeters: safeRadius,
+    center: { lat, lng },
+  }
+}
+
+function normalizeZone(zone) {
+  if (!zone) {
+    return {
+      boxXMin: '0',
+      boxXMax: '3600000000',
+      boxYMin: '0',
+      boxYMax: '1800000000',
+      radiusMeters: null,
+      center: null,
+    }
+  }
+
+  for (const key of ['boxXMin', 'boxXMax', 'boxYMin', 'boxYMax']) {
+    if (zone[key] === undefined || zone[key] === null || !Number.isFinite(Number(zone[key]))) {
+      throw new Error(`Invalid ZK proof zone: ${key} is required.`)
+    }
+  }
+
+  return {
+    boxXMin: String(Math.trunc(Number(zone.boxXMin))),
+    boxXMax: String(Math.trunc(Number(zone.boxXMax))),
+    boxYMin: String(Math.trunc(Number(zone.boxYMin))),
+    boxYMax: String(Math.trunc(Number(zone.boxYMax))),
+    radiusMeters: zone.radiusMeters ?? null,
+    center: zone.center ?? null,
+  }
+}
+
+export function shortProofId(value) {
+  const text = String(value || '')
+  if (text.length <= 18) return text
+  return `${text.slice(0, 10)}...${text.slice(-6)}`
 }
 
 // Decode Stellar G... address → 32 bytes → BigInt → reduce mod BN254 prime → field element
@@ -241,20 +314,24 @@ function buildCampaignPrefix(publicInputsBytes) {
  * Generate a ZK location proof through the local prover server.
  * Browser proving is available only when VITE_ZK_BROWSER_FALLBACK=true.
  *
- * @param {{ lat: number, lng: number, campaignId?: string, recipientAddress: string }} opts
+ * @param {{ lat: number, lng: number, campaignId?: string, recipientAddress: string, zone?: object }} opts
  * @returns {{ proof: Uint8Array, publicInputsBytes: Uint8Array, nullifier: string }}
  */
-export async function generateLocationProof({ lat, lng, campaignId = '1', recipientAddress, onLog = () => {} }) {
+export async function generateLocationProof({ lat, lng, campaignId = '1', recipientAddress, zone, onLog = () => {} }) {
   const proverUrl = (import.meta.env.VITE_ZK_PROVER_URL || '/zk').replace(/\/$/, '')
   const allowBrowserFallback = import.meta.env.VITE_ZK_BROWSER_FALLBACK === 'true'
+  const proofZone = normalizeZone(zone)
 
   if (proverUrl) {
     try {
-      return await _requestServerProof({ lat, lng, campaignId, recipientAddress, onLog, proverUrl })
+      return await _requestServerProof({ lat, lng, campaignId, recipientAddress, zone: proofZone, onLog, proverUrl })
     } catch (err) {
       if (!allowBrowserFallback) {
         onLog('ZK prover server is not available')
-        throw new Error(`${err.message}. Start the app with npm run dev so the local prover server is running.`)
+        const hint = import.meta.env.PROD
+          ? 'Set VITE_ZK_PROVER_URL to your hosted ZK prover (see README → Deploy).'
+          : 'Start the app with npm run dev so the local prover server is running.'
+        throw new Error(`${err.message}. ${hint}`)
       }
       onLog(`Server prover: ${err.message}. Falling back to browser because VITE_ZK_BROWSER_FALLBACK=true.`)
     }
@@ -265,7 +342,7 @@ export async function generateLocationProof({ lat, lng, campaignId = '1', recipi
     return _proofLock
   }
 
-  _proofLock = _browserProof({ lat, lng, campaignId, recipientAddress, onLog })
+  _proofLock = _browserProof({ lat, lng, campaignId, recipientAddress, zone: proofZone, onLog })
 
   try {
     return await _proofLock
@@ -274,7 +351,7 @@ export async function generateLocationProof({ lat, lng, campaignId = '1', recipi
   }
 }
 
-async function _requestServerProof({ lat, lng, campaignId = '1', recipientAddress, onLog = () => {}, proverUrl }) {
+async function _requestServerProof({ lat, lng, campaignId = '1', recipientAddress, zone, onLog = () => {}, proverUrl }) {
   onLog('Checking local ZK prover server')
   await _checkServerProver(proverUrl, onLog)
   onLog('Requesting proof from local prover server')
@@ -285,10 +362,10 @@ async function _requestServerProof({ lat, lng, campaignId = '1', recipientAddres
     user_x:            encodeLng(lng),
     user_y:            encodeLat(lat),
     secret_id:         secretId,
-    box_x_min:         '0',
-    box_x_max:         '3600000000',
-    box_y_min:         '0',
-    box_y_max:         '1800000000',
+    box_x_min:         zone.boxXMin,
+    box_x_max:         zone.boxXMax,
+    box_y_min:         zone.boxYMin,
+    box_y_max:         zone.boxYMax,
     campaign_id:       campaignId,
     recipient_address: recipientField,
   }
@@ -318,6 +395,7 @@ async function _requestServerProof({ lat, lng, campaignId = '1', recipientAddres
     publicInputsBytes,
     publicInputsPrefix: buildCampaignPrefix(publicInputsBytes),
     nullifier,
+    zone,
   }
 }
 
@@ -371,7 +449,7 @@ function hexToUint8Array(hex) {
   return bytes
 }
 
-async function _browserProof({ lat, lng, campaignId = '1', recipientAddress, onLog = () => {} }) {
+async function _browserProof({ lat, lng, campaignId = '1', recipientAddress, zone, onLog = () => {} }) {
   onLog('Loading ZK circuit artifacts')
   await init(onLog)
 
@@ -384,20 +462,14 @@ async function _browserProof({ lat, lng, campaignId = '1', recipientAddress, onL
   const secretId = getOrCreateSecret()
   const recipientField = addressToField(recipientAddress)
 
-  // Global bounding box: covers entire world
-  const BOX_X_MIN = '0'           // lon -180
-  const BOX_X_MAX = '3600000000'  // lon +180
-  const BOX_Y_MIN = '0'           // lat -90
-  const BOX_Y_MAX = '1800000000'  // lat +90
-
   const inputs = {
     user_x:            encodeLng(lng),
     user_y:            encodeLat(lat),
     secret_id:         secretId,
-    box_x_min:         BOX_X_MIN,
-    box_x_max:         BOX_X_MAX,
-    box_y_min:         BOX_Y_MIN,
-    box_y_max:         BOX_Y_MAX,
+    box_x_min:         zone.boxXMin,
+    box_x_max:         zone.boxXMax,
+    box_y_min:         zone.boxYMin,
+    box_y_max:         zone.boxYMax,
     campaign_id:       campaignId,
     recipient_address: recipientField,
   }
@@ -443,7 +515,7 @@ async function _browserProof({ lat, lng, campaignId = '1', recipientAddress, onL
     : String(returnValue)
 
   const publicInputsBytes = buildPublicInputsBytes(
-    BOX_X_MIN, BOX_X_MAX, BOX_Y_MIN, BOX_Y_MAX,
+    zone.boxXMin, zone.boxXMax, zone.boxYMin, zone.boxYMax,
     campaignId, recipientField, nullifier
   )
 
@@ -455,5 +527,6 @@ async function _browserProof({ lat, lng, campaignId = '1', recipientAddress, onL
     publicInputsPrefix: buildCampaignPrefix(publicInputsBytes),
     nullifier,
     publicInputs,
+    zone,
   }
 }

@@ -89,6 +89,7 @@ pub enum HelPhoneError {
 const EVT_REQ_CREATED: Symbol = symbol_short!("RqCreated");
 const EVT_REQ_ACCEPTED: Symbol = symbol_short!("RqAcptd");
 const EVT_ARRIVED: Symbol = symbol_short!("Arrived");
+const EVT_LOC_UPD: Symbol = symbol_short!("LocUpd");
 const EVT_RESOLVED: Symbol = symbol_short!("Resolved");
 const EVT_CANCELLED: Symbol = symbol_short!("Cancelled");
 const EVT_EXPERT: Symbol = symbol_short!("Expert");
@@ -168,6 +169,36 @@ impl HelPhone {
         ), ());
 
         index
+    }
+
+    pub fn update_location(
+        env: Env,
+        responder: Address,
+        request_id: u64,
+        lat: i32,
+        lng: i32,
+    ) {
+        // No auth — location is public (visible on the map anyway).
+
+        let count = Self::count_get_u32(&env, DataKey::ResponderCount(request_id));
+        let mut found = false;
+        for i in 0..count {
+            let key = DataKey::Responder(request_id, i);
+            if let Some(mut r) = env.storage().persistent().get::<DataKey, Responder>(&key) {
+                if r.responder == responder {
+                    r.lat = lat;
+                    r.lng = lng;
+                    env.storage().persistent().set(&key, &r);
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            panic_with_error!(&env, HelPhoneError::NotFound);
+        }
+
+        env.events().publish((EVT_LOC_UPD, request_id, responder, lat, lng), ());
     }
 
     pub fn mark_arrived(env: Env, responder: Address, request_id: u64) {

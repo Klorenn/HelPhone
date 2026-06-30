@@ -2,10 +2,10 @@ import { useState, useEffect, useRef, Fragment } from 'react'
 import { Link } from 'react-router-dom'
 import { StellarWalletsKit } from '@creit-tech/stellar-wallets-kit/sdk'
 import { KitEventType } from '@creit-tech/stellar-wallets-kit/types'
-import { StrKey } from '@stellar/stellar-sdk'
 import Map, { Marker, Popup, Source, Layer, NavigationControl, useMap } from 'react-map-gl/mapbox'
 import 'mapbox-gl/dist/mapbox-gl.css'
-import { getRequest, getActiveRequests, getResponder, getResponderCount, createRequest, acceptRequest, markArrived, resolveRequest, cancelRequest, getRanking, ensureAccountFunded, getExpertVerifications, recordExpertVerification as writeExpertVerification, claimAid } from '../lib/contract'
+import { getRequest, getActiveRequests, getResponder, getResponderCount, createRequest, acceptRequest, markArrived, resolveRequest, cancelRequest, getRanking, ensureAccountFunded, updateLocation, recordExpertVerification } from '../lib/contract'
+import { buildLocationProofZone, generateLocationProof, shortProofId } from '../lib/zk'
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN
 
@@ -15,7 +15,6 @@ const MAP_STYLES = [
   { id: 'dark',      name: 'Dark 2D',  url: 'mapbox://styles/mapbox/dark-v11',                 desc: 'Dark background — reduces glare, ideal for low-light or nighttime use.' },
 ]
 
-// ── Character sets by gender ──────────────────────────────────────
 const CHARS = {
   male:        ['runner', 'pacheco', 'growth', 'jumping-air'],
   female:      ['chilly', 'meela-pantalones', 'feliz', 'pondering'],
@@ -25,7 +24,8 @@ const CHARS = {
 
 function pickChar(gender, seed = '') {
   const pool = CHARS[gender] || CHARS.default
-  const idx = seed.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % pool.length
+  const s = String(seed)
+  const idx = s.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % pool.length
   return pool[idx]
 }
 
@@ -44,7 +44,6 @@ function CharMarker({ charName, accentColor = '#FF7A6B', lat, lng, onClick, chil
   )
 }
 
-// ── Map helpers ───────────────────────────────────────────────────
 function MapController({ center, zoom = 14 }) {
   const { current: map } = useMap()
   useEffect(() => {
@@ -53,8 +52,18 @@ function MapController({ center, zoom = 14 }) {
   return null
 }
 
-function RouteLine({ from, to, color = '#7357FF' }) {
-  const id = `route-${from[0]}-${from[1]}-${to[0]}-${to[1]}`
+function distance(a, b) {
+  const R = 6371
+  const dLat = (b[0] - a[0]) * Math.PI / 180
+  const dLng = (b[1] - a[1]) * Math.PI / 180
+  const sinLat = Math.sin(dLat / 2)
+  const sinLng = Math.sin(dLng / 2)
+  const h = sinLat * sinLat + Math.cos(a[0] * Math.PI / 180) * Math.cos(b[0] * Math.PI / 180) * sinLng * sinLng
+  return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h))
+}
+
+function RouteLine({ id: routeId, from, to, color = '#7357FF' }) {
+  const id = `route-${routeId || `${from[0]}-${from[1]}-${to[0]}-${to[1]}`}`
   return (
     <Source id={id} type="geojson" data={{
       type: 'Feature',
@@ -72,42 +81,78 @@ function RouteLine({ from, to, color = '#7357FF' }) {
   )
 }
 
-// ── localStorage ─────────────────────────────────────────────────
 function loadProfile() {
   try { return JSON.parse(localStorage.getItem('hp_profile') || '{}') } catch { return {} }
 }
 
 const DEFAULT_CENTER = [20, 0]
-const EXPERT_STORAGE_KEY = 'hp_stellar_expert_verification'
 
-function loadExpertVerification() {
-  try { return JSON.parse(localStorage.getItem(EXPERT_STORAGE_KEY) || 'null') } catch { return null }
+const MY_REQUESTS_KEY = 'hp_my_requests'
+
+function loadMyRequestIds() {
+  try { return JSON.parse(localStorage.getItem(MY_REQUESTS_KEY) || '[]') } catch { return [] }
 }
 
-function normalizeExpertVerification(raw, fallbackWallet = '') {
-  if (!raw) return null
-  const walletAddress = raw.walletAddress || raw.wallet || raw.wallet_address || fallbackWallet || ''
-  const verifiedAtRaw = raw.verifiedAt || raw.verified_at || raw.at || null
-  const verifiedAt = typeof verifiedAtRaw === 'number'
-    ? new Date(verifiedAtRaw * 1000).toISOString()
-    : verifiedAtRaw || new Date().toISOString()
-
-  return {
-    walletAddress,
-    verifiedAt,
-    network: raw.network || 'testnet',
-    lastAction: raw.lastAction || raw.action || '',
-    actionTxHash: raw.actionTxHash || raw.action_tx_hash || raw.tx_hash || raw.txHash || '',
-    verificationTxHash: raw.verificationTxHash || raw.verification_tx_hash || '',
-    lastTxHash: raw.lastTxHash || raw.verificationTxHash || raw.verification_tx_hash || raw.tx_hash || raw.txHash || '',
-    proofFingerprint: raw.proofFingerprint || raw.proof_fingerprint || '',
-    proofs: raw.proofs || {},
-    history: raw.history || [],
+function saveMyRequestId(id) {
+  const ids = loadMyRequestIds()
+  if (!ids.includes(id)) {
+    ids.unshift(id)
+    localStorage.setItem(MY_REQUESTS_KEY, JSON.stringify(ids.slice(0, 20)))
   }
 }
 
-// ── Step indicator ────────────────────────────────────────────────
-function Step({ n, title, subtitle, done, active, help, children }) {
+function anonymizeLocation(location) {
+  if (!location) return location
+  return [
+    Math.round(location[0] * 100) / 100,
+    Math.round(location[1] * 100) / 100,
+  ]
+}
+
+function privateRequestLabel(id) {
+  return `Private request #${id || 'pending'}`
+}
+
+function txExplorerUrl(hash) {
+  if (!hash) return null
+  return `https://stellar.expert/explorer/testnet/tx/${hash}`
+}
+
+function ExplorerLink({ label, hash }) {
+  const url = txExplorerUrl(hash)
+  if (!url) return null
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={`View ${label.toLowerCase()} on Stellar Expert (testnet)`}
+      style={{
+        display: 'flex', alignItems: 'center', gap: '6px',
+        fontSize: '10px', color: '#7fb8ba', textDecoration: 'none',
+        fontFamily: "'Courier New', monospace", cursor: 'pointer',
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+      }}
+      onMouseEnter={e => { e.currentTarget.style.textDecoration = 'underline' }}
+      onMouseLeave={e => { e.currentTarget.style.textDecoration = 'none' }}
+    >
+      <span style={{ color: 'rgba(242,236,220,0.4)' }}>{label}</span>
+      <span>{shortProofId(hash)}</span>
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
+        <path d="M7 17L17 7M17 7H8M17 7v9" />
+      </svg>
+    </a>
+  )
+}
+
+function proofCampaignId(seed) {
+  const text = String(seed || Date.now())
+  let acc = 0n
+  for (const ch of text) acc = (acc * 131n + BigInt(ch.charCodeAt(0))) % 999999937n
+  return String(acc + 1n)
+}
+
+function Step({ n, title, subtitle, done, active, children }) {
   return (
     <div style={{ marginBottom: '6px', opacity: (!active && !done) ? 0.38 : 1, transition: 'opacity 0.3s' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: children ? '12px' : 0 }}>
@@ -122,149 +167,14 @@ function Step({ n, title, subtitle, done, active, help, children }) {
           {done ? '✓' : n}
         </div>
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <div style={{ fontSize: '13px', fontWeight: '600', color: done ? '#3F8487' : active ? 'rgba(242,236,220,0.95)' : 'rgba(242,236,220,0.45)' }}>
-              {title}
-            </div>
-            {help && <HelpTip label={`${title} help`}>{help}</HelpTip>}
+          <div style={{ fontSize: '13px', fontWeight: '600', color: done ? '#3F8487' : active ? 'rgba(242,236,220,0.95)' : 'rgba(242,236,220,0.45)' }}>
+            {title}
           </div>
           {subtitle && <div style={{ fontSize: '11px', color: 'rgba(242,236,220,0.35)', marginTop: '1px' }}>{subtitle}</div>}
         </div>
       </div>
       {children && <div style={{ marginLeft: '36px' }}>{children}</div>}
     </div>
-  )
-}
-
-function ZkProgressLog({ entries, active }) {
-  if (!active && entries.length === 0) return null
-  return (
-    <div style={{
-      marginTop: '10px', padding: '10px 12px', borderRadius: '8px',
-      background: 'rgba(0,0,0,0.18)', border: '1px solid rgba(255,255,255,0.08)'
-    }}>
-      <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        marginBottom: '7px', fontSize: '10px', letterSpacing: '1px',
-        color: 'rgba(242,236,220,0.4)', fontWeight: 700
-      }}>
-        <span>PROOF LOG</span>
-        {active && <span style={{ color: '#FF7A6B' }}>RUNNING</span>}
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-        {entries.map(entry => (
-          <div key={entry.id} style={{ display: 'grid', gridTemplateColumns: '56px 1fr', gap: '8px', alignItems: 'baseline' }}>
-            <span style={{ fontSize: '10px', color: 'rgba(242,236,220,0.25)', fontVariantNumeric: 'tabular-nums' }}>{entry.at}</span>
-            <span style={{ fontSize: '11px', color: 'rgba(242,236,220,0.62)', lineHeight: 1.35 }}>{entry.message}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function stellarExpertTxUrl(txHash) {
-  return txHash ? `https://stellar.expert/explorer/testnet/tx/${txHash}` : ''
-}
-
-function stellarExpertAccountUrl(walletAddress) {
-  return walletAddress ? `https://stellar.expert/explorer/testnet/account/${walletAddress}` : ''
-}
-
-function actionLabel(action = '') {
-  const normalized = String(action || '').replace(/_zk_proof$/, '')
-  const labels = {
-    request_created: 'Help request',
-    aid_offered: 'Help offer',
-    aid_claimed: 'Aid claim',
-    location_proof: 'Location proof',
-  }
-  return labels[normalized] || normalized.replace(/_/g, ' ') || 'Checkpoint'
-}
-
-function receiptCopy(action = '') {
-  const normalized = String(action || '').replace(/_zk_proof$/, '')
-  if (normalized === 'aid_offered') {
-    return {
-      title: 'Help offer registered',
-      body: 'Your help offer is on Stellar. The person asking for help can see your responder pin, and the ZK checkpoint is attached when it finishes.',
-    }
-  }
-  if (normalized === 'request_created') {
-    return {
-      title: 'Help request registered',
-      body: 'Your help request is on Stellar. Nearby helpers can see it, and the ZK checkpoint is attached when it finishes.',
-    }
-  }
-  if (normalized === 'aid_claimed') {
-    return {
-      title: 'Aid claim registered',
-      body: 'The aid claim is on Stellar and can be checked from the transaction link.',
-    }
-  }
-  return {
-    title: 'Checkpoint registered',
-    body: 'The action is on Stellar. The transaction link is the public receipt.',
-  }
-}
-
-function shortHash(hash = '') {
-  return hash ? `${hash.slice(0, 10)}...${hash.slice(-8)}` : ''
-}
-
-function proofFailureSummary(message = '') {
-  const text = String(message || 'Proof generation failed').trim()
-  if (/local zk prover server is unreachable/i.test(text)) {
-    return 'Local ZK prover is unreachable. Restart with npm run dev and press Retry ZK.'
-  }
-  if (/start the app with npm run dev/i.test(text)) {
-    return 'Local ZK prover is not running. Restart with npm run dev and press Retry ZK.'
-  }
-  if (/wallet/i.test(text) && /valid|connect|reconnect/i.test(text)) {
-    return 'Reconnect a valid Stellar wallet and press Retry ZK.'
-  }
-  return text.length > 220 ? `${text.slice(0, 217)}...` : text
-}
-
-function receiptTxHash(record) {
-  return record?.verificationTxHash || record?.actionTxHash || record?.lastTxHash || ''
-}
-
-function HelpTip({ label, children }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <span
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-      style={{ position: 'relative', display: 'inline-flex', verticalAlign: 'middle' }}
-    >
-      <button
-        type="button"
-        aria-label={label || 'More information'}
-        onClick={(e) => { e.stopPropagation(); setOpen(o => !o) }}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
-        style={{
-          width: '20px', height: '20px', borderRadius: '50%', border: '1px solid rgba(242,236,220,0.22)',
-          background: 'rgba(255,255,255,0.05)', color: 'rgba(242,236,220,0.68)',
-          fontSize: '12px', fontWeight: 800, lineHeight: 1, cursor: 'pointer',
-          display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: 0
-        }}
-      >
-        ?
-      </button>
-      {open && (
-        <span style={{
-          position: 'absolute', top: '26px', left: 0, zIndex: 80,
-          width: '220px', padding: '10px 11px', borderRadius: '9px',
-          background: '#101c18', border: '1px solid rgba(255,255,255,0.1)',
-          boxShadow: '0 14px 36px rgba(0,0,0,0.44)', color: 'rgba(242,236,220,0.72)',
-          fontSize: '11px', lineHeight: 1.45, fontWeight: 500, letterSpacing: 0
-        }}>
-          {children}
-        </span>
-      )}
-    </span>
   )
 }
 
@@ -276,7 +186,7 @@ function HelpOnboardingModal({ open, onClose, onConnectWallet }) {
 
   if (!open) return null
 
-  const totalSteps = 4
+  const totalSteps = 3
 
   const steps = [
     {
@@ -287,12 +197,7 @@ function HelpOnboardingModal({ open, onClose, onConnectWallet }) {
     {
       label: 'Receipt',
       title: 'Your action goes on-chain first',
-      body: 'When you request or offer help, Stellar confirms it in seconds. That creates a public transaction hash — your receipt. The action comes first, the proof comes after.',
-    },
-    {
-      label: 'ZK',
-      title: 'ZK proof protects your privacy',
-      body: 'A zero-knowledge proof confirms you\'re really at your location without revealing your exact coordinates. The local prover creates it and attaches it as a checkpoint after the on-chain action.',
+      body: 'When you request or offer help, Stellar confirms it in seconds. That creates a public transaction hash — your receipt.',
     },
     {
       label: 'Wallet',
@@ -363,7 +268,7 @@ function HelpOnboardingModal({ open, onClose, onConnectWallet }) {
             border: '1px solid rgba(63,132,135,0.28)', color: '#7fb8ba',
             fontSize: '11px', fontWeight: 900, letterSpacing: '1px', marginBottom: '16px'
           }}>
-            {step + 1}/4 · {current.label}
+            {step + 1}/{totalSteps} · {current.label}
           </div>
           <h2 style={{ margin: '0 0 10px', color: '#F4ECDC', fontSize: '22px', lineHeight: 1.15, fontWeight: 700 }}>
             {current.title}
@@ -405,213 +310,130 @@ function HelpOnboardingModal({ open, onClose, onConnectWallet }) {
   )
 }
 
-function FlowProgressModal({
-  open,
-  onClose,
-  title,
-  accentColor,
-  receiptAction,
-  location,
-  profile,
-  walletAddress,
-  entries,
-  active,
-  txHash,
-  actionTxHash,
-  proofTxHash,
-  error,
-  canRetryProof,
-  onRetryProof,
+function TrackingScreen({
+  responderLat,
+  responderLng,
+  responderAddress,
+  responderChar,
+  requesterLat,
+  requesterLng,
+  requesterChar,
+  etaSeconds,
+  isArrived,
+  isResponderView,
+  onMarkArrived,
+  onResolve,
 }) {
-  if (!open) return null
-  const copy = receiptCopy(receiptAction)
-  const primaryTxHash = proofTxHash || actionTxHash || txHash || ''
-  const txUrl = stellarExpertTxUrl(primaryTxHash)
-  const actionUrl = stellarExpertTxUrl(actionTxHash)
-  const proofUrl = stellarExpertTxUrl(proofTxHash)
-  const hasActionReceipt = Boolean(actionTxHash)
-  const hasProofReceipt = Boolean(proofTxHash)
+  const dist = (requesterLat != null && responderLat != null)
+    ? Math.round(distance([requesterLat, requesterLng], [responderLat, responderLng]) * 10) / 10
+    : null
+  const etaMin = etaSeconds ? Math.round(etaSeconds / 60) : null
 
   return (
-    <div style={{
-      position: 'fixed', inset: 0, zIndex: 9997, background: 'rgba(0,0,0,0.68)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '18px'
-    }}>
+    <>
+      {responderLat != null && (
+        <CharMarker charName={responderChar || pickChar('default', responderAddress)} accentColor="#7357FF"
+          lat={responderLat} lng={responderLng}>
+          {!isArrived && (
+            <div style={{
+              position: 'absolute', top: '50%', left: '50%',
+              width: '52px', height: '52px', transform: 'translate(-50%, -50%) scale(1.5)',
+              borderRadius: '50%', border: '2px solid rgba(115,87,255,0.3)',
+              animation: 'mdpulse 2s ease-out infinite',
+              pointerEvents: 'none'
+            }} />
+          )}
+        </CharMarker>
+      )}
+      {responderLat != null && requesterLat != null && (
+        <RouteLine id="tracking-route" from={[responderLat, responderLng]} to={[requesterLat, requesterLng]} color="#7357FF" />
+      )}
+
       <div style={{
-        width: '100%', maxWidth: '480px', maxHeight: 'calc(100vh - 36px)',
-        overflow: 'auto', borderRadius: '14px', background: '#1c2c24',
-        border: '1px solid rgba(255,255,255,0.08)', boxShadow: '0 24px 72px rgba(0,0,0,0.58)'
+        position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 100,
+        background: 'linear-gradient(transparent, rgba(0,0,0,0.7) 30%)',
+        padding: '40px 20px 20px', pointerEvents: 'none'
       }}>
         <div style={{
-          padding: '16px 18px', borderBottom: '1px solid rgba(255,255,255,0.06)',
-          display: 'flex', alignItems: 'center', gap: '12px'
+          background: '#1c2c24', borderRadius: '16px', padding: '16px 18px',
+          border: '1px solid rgba(255,255,255,0.08)', maxWidth: '460px', margin: '0 auto',
+          pointerEvents: 'auto', boxShadow: '0 8px 32px rgba(0,0,0,0.4)'
         }}>
-          <div style={{
-            width: '10px', height: '10px', borderRadius: '50%',
-            background: active ? accentColor : error ? '#FF7A6B' : '#3F8487',
-            boxShadow: active ? `0 0 0 6px ${accentColor}22` : 'none',
-            flexShrink: 0
-          }} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: '10px', letterSpacing: '1.4px', fontWeight: 700, color: 'rgba(242,236,220,0.35)' }}>
-              {active ? 'PROCESSING' : error ? 'NEEDS ATTENTION' : 'REGISTERED'}
-            </div>
-            <h3 style={{ margin: '3px 0 0', fontSize: '18px', lineHeight: 1.2, color: '#F4ECDC' }}>{title}</h3>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close progress"
-            style={{
-              width: '36px', height: '36px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.08)',
-              background: 'rgba(255,255,255,0.05)', color: 'rgba(242,236,220,0.65)',
-              cursor: 'pointer', fontSize: '18px', lineHeight: 1
-            }}
-          >
-            x
-          </button>
-        </div>
-
-        <div style={{ padding: '16px 18px 18px' }}>
-          <div style={{
-            marginBottom: '12px', padding: '11px 12px', borderRadius: '10px',
-            background: hasActionReceipt ? 'rgba(63,132,135,0.12)' : 'rgba(255,255,255,0.04)',
-            border: `1px solid ${hasActionReceipt ? 'rgba(63,132,135,0.25)' : 'rgba(255,255,255,0.06)'}`
-          }}>
-            <div style={{ fontSize: '13px', fontWeight: 800, color: hasActionReceipt ? '#7fb8ba' : '#F4ECDC', marginBottom: '4px' }}>
-              {hasActionReceipt ? copy.title : actionLabel(receiptAction)}
-            </div>
-            <div style={{ fontSize: '11px', lineHeight: 1.45, color: 'rgba(242,236,220,0.54)' }}>
-              {copy.body}
-            </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+            <div style={{
+              width: '8px', height: '8px', borderRadius: '50%',
+              background: isArrived ? '#3F8487' : '#7357FF',
+              animation: isArrived ? 'none' : 'mdblink 1.4s steps(1) infinite'
+            }} />
+            <span style={{
+              fontSize: '11px', fontWeight: 700, letterSpacing: '1.5px',
+              color: isArrived ? '#3F8487' : '#B3A6FF'
+            }}>
+              {isArrived ? 'ARRIVED' : 'EN ROUTE'}
+            </span>
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '12px' }}>
-            {[
-              ['Location', location ? `${location[0].toFixed(5)}, ${location[1].toFixed(5)}` : 'Not set'],
-              ['Alias', profile.nickname || 'Anonymous'],
-              ['Contact', profile.contact || 'Not provided'],
-              ['Wallet', walletAddress ? `${walletAddress.slice(0, 8)}...${walletAddress.slice(-6)}` : 'Not connected'],
-            ].map(([label, value]) => (
-              <div key={label} style={{
-                padding: '9px 10px', borderRadius: '8px', background: 'rgba(255,255,255,0.04)',
-                border: '1px solid rgba(255,255,255,0.06)', minWidth: 0
-              }}>
-                <div style={{ fontSize: '9px', letterSpacing: '1px', color: 'rgba(242,236,220,0.32)', marginBottom: '4px' }}>{label}</div>
-                <div style={{ fontSize: '11px', color: '#F4ECDC', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</div>
+            <div style={{ padding: '9px 10px', borderRadius: '8px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)' }}>
+              <div style={{ fontSize: '9px', letterSpacing: '1px', color: 'rgba(242,236,220,0.32)', marginBottom: '4px' }}>RESPONDER</div>
+              <div style={{ fontSize: '11px', color: '#F4ECDC', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {responderAddress ? `${responderAddress.slice(0, 8)}...` : 'Unknown'}
               </div>
-            ))}
+            </div>
+            <div style={{ padding: '9px 10px', borderRadius: '8px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)' }}>
+              <div style={{ fontSize: '9px', letterSpacing: '1px', color: 'rgba(242,236,220,0.32)', marginBottom: '4px' }}>DISTANCE</div>
+              <div style={{ fontSize: '11px', color: '#F4ECDC' }}>
+                {dist != null ? `${dist} km` : '—'}
+              </div>
+            </div>
+            <div style={{ padding: '9px 10px', borderRadius: '8px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)' }}>
+              <div style={{ fontSize: '9px', letterSpacing: '1px', color: 'rgba(242,236,220,0.32)', marginBottom: '4px' }}>ETA</div>
+              <div style={{ fontSize: '11px', color: '#F4ECDC' }}>
+                {isArrived ? 'Arrived' : etaMin != null ? `${etaMin} min` : '—'}
+              </div>
+            </div>
+            <div style={{ padding: '9px 10px', borderRadius: '8px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)' }}>
+              <div style={{ fontSize: '9px', letterSpacing: '1px', color: 'rgba(242,236,220,0.32)', marginBottom: '4px' }}>STATUS</div>
+              <div style={{ fontSize: '11px', color: isArrived ? '#3F8487' : '#B3A6FF' }}>
+                {isArrived ? 'Arrived' : 'En Route'}
+              </div>
+            </div>
           </div>
 
-          {(hasActionReceipt || hasProofReceipt) && (
-            <div style={{
-              display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px',
-              marginBottom: '12px'
-            }}>
-              <div style={{
-                padding: '10px 11px', borderRadius: '8px', background: 'rgba(255,255,255,0.04)',
-                border: '1px solid rgba(255,255,255,0.06)', minWidth: 0
+          <div style={{ display: 'flex', gap: '8px' }}>
+            {isResponderView && !isArrived && (
+              <button onClick={onMarkArrived} style={{
+                flex: 1, padding: '11px 14px', borderRadius: '10px', border: 'none',
+                background: '#3F8487', color: '#fff', fontSize: '13px', fontWeight: 700, cursor: 'pointer'
               }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '5px' }}>
-                  <span style={{ fontSize: '9px', letterSpacing: '1px', color: 'rgba(242,236,220,0.32)' }}>ACTION TX</span>
-                  <HelpTip label="Action transaction help">This is the real receipt for requesting help or accepting a help request. It only appears after Stellar confirms the transaction.</HelpTip>
-                </div>
-                {actionUrl ? (
-                  <a href={actionUrl} target="_blank" rel="noreferrer" style={{ fontSize: '11px', color: '#7fb8ba', textDecoration: 'none', wordBreak: 'break-all' }}>
-                    {shortHash(actionTxHash)}
-                  </a>
-                ) : (
-                  <div style={{ fontSize: '11px', color: 'rgba(242,236,220,0.34)' }}>{hasActionReceipt ? 'Recorded' : 'Waiting'}</div>
-                )}
-              </div>
-              <div style={{
-                padding: '10px 11px', borderRadius: '8px', background: hasProofReceipt ? 'rgba(63,132,135,0.1)' : 'rgba(255,255,255,0.04)',
-                border: `1px solid ${hasProofReceipt ? 'rgba(63,132,135,0.25)' : 'rgba(255,255,255,0.06)'}`, minWidth: 0
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '5px' }}>
-                  <span style={{ fontSize: '9px', letterSpacing: '1px', color: 'rgba(242,236,220,0.32)' }}>ZK TX</span>
-                  <HelpTip label="ZK transaction help">This checkpoint records the ZK proof. It can take longer than the main action and can be retried.</HelpTip>
-                </div>
-                {proofUrl ? (
-                  <a href={proofUrl} target="_blank" rel="noreferrer" style={{ fontSize: '11px', color: '#7fb8ba', textDecoration: 'none', wordBreak: 'break-all' }}>
-                    {shortHash(proofTxHash)}
-                  </a>
-                ) : (
-                  <div style={{ fontSize: '11px', color: error ? '#FF7A6B' : 'rgba(242,236,220,0.34)' }}>
-                    {error ? 'Pending retry' : active ? 'Generating' : 'Pending'}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          <ZkProgressLog entries={entries} active={active} />
-
-          {error && (
-            <div style={{
-              marginTop: '10px', padding: '10px 12px', borderRadius: '8px',
-              border: '1px solid rgba(255,122,107,0.25)', background: 'rgba(255,122,107,0.08)',
-              color: '#FF7A6B', fontSize: '12px', lineHeight: 1.45
-            }}>
-              {error}
-            </div>
-          )}
-
-          <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
-            {canRetryProof && (
-              <button
-                type="button"
-                onClick={onRetryProof}
-                style={{
-                  padding: '10px 12px', borderRadius: '8px', border: '1px solid rgba(255,122,107,0.26)',
-                  background: 'rgba(255,122,107,0.12)', color: '#FF7A6B',
-                  fontSize: '12px', fontWeight: 700, cursor: 'pointer'
-                }}
-              >
-                Retry ZK
+                Mark Arrived
               </button>
             )}
-            {txUrl ? (
-              <a
-                href={txUrl}
-                target="_blank"
-                rel="noreferrer"
-                style={{
-                  flex: 1, padding: '10px 12px', borderRadius: '8px', textAlign: 'center',
-                  background: '#3F8487', color: '#fff', fontSize: '12px', fontWeight: 700,
-                  textDecoration: 'none', border: '1px solid rgba(63,132,135,0.22)'
-                }}
-              >
-                Open receipt on Stellar Expert
-              </a>
-            ) : (
-              <div style={{
-                flex: 1, padding: '10px 12px', borderRadius: '8px', textAlign: 'center',
-                background: 'rgba(255,255,255,0.04)', color: 'rgba(242,236,220,0.38)',
-                fontSize: '12px', fontWeight: 700, border: '1px solid rgba(255,255,255,0.07)'
+            {!isResponderView && isArrived && (
+              <button onClick={onResolve} style={{
+                flex: 1, padding: '11px 14px', borderRadius: '10px', border: 'none',
+                background: '#7357FF', color: '#fff', fontSize: '13px', fontWeight: 700, cursor: 'pointer'
               }}>
-                Receipt appears after Stellar confirms
+                Resolve Request
+              </button>
+            )}
+            {isResponderView && isArrived && (
+              <div style={{
+                flex: 1, padding: '11px 14px', borderRadius: '10px',
+                background: 'rgba(63,132,135,0.12)', color: '#3F8487',
+                fontSize: '12px', fontWeight: 700, textAlign: 'center',
+                border: '1px solid rgba(63,132,135,0.25)'
+              }}>
+                ARRIVED ✓
               </div>
             )}
-            <button
-              type="button"
-              onClick={onClose}
-              style={{
-                padding: '10px 12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.08)',
-                background: 'rgba(255,255,255,0.05)', color: 'rgba(242,236,220,0.72)',
-                fontSize: '12px', fontWeight: 700, cursor: 'pointer'
-              }}
-            >
-              Close
-            </button>
           </div>
         </div>
       </div>
-    </div>
+    </>
   )
 }
 
-// ── Emergency types ──────────────────────────────────────────────
 const EMERGENCY_TYPES = [
   { id: 'lost',    icon: '🧭', label: 'I\'m lost',             desc: 'Don\'t know where I am or how to get back' },
   { id: 'fallen',  icon: '🩹', label: 'Fell / injured',       desc: 'Need assistance after a fall or injury' },
@@ -665,9 +487,8 @@ const ET_ICONS = {
   ),
 }
 
-// ── Main component ────────────────────────────────────────────────
 export default function Help() {
-  const [mode, setMode] = useState('get') // 'get' | 'offer'
+  const [mode, setMode] = useState('get')
 
   const [profile, setProfile] = useState(() => {
     const p = loadProfile()
@@ -678,21 +499,6 @@ export default function Help() {
   const [showEmergencyModal, setShowEmergencyModal] = useState(false)
   const [showOnboarding, setShowOnboarding] = useState(true)
 
-  const [zkState, setZkState] = useState('idle') // 'idle' | 'loading' | 'done' | 'error'
-  const [zkError, setZkError] = useState('')
-  const [zkProof, setZkProof] = useState(null)
-  const [zkLog, setZkLog] = useState([])
-  const [flowPopupOpen, setFlowPopupOpen] = useState(false)
-  const [flowPopupTitle, setFlowPopupTitle] = useState('Processing request')
-  const [flowAction, setFlowAction] = useState('')
-  const [flowTxHash, setFlowTxHash] = useState('')
-  const [flowActionTxHash, setFlowActionTxHash] = useState('')
-  const [flowProofTxHash, setFlowProofTxHash] = useState('')
-  const [flowWalletAddress, setFlowWalletAddress] = useState('')
-  const [pendingProofRegistration, setPendingProofRegistration] = useState(null)
-  const [claimState, setClaimState] = useState('idle') // 'idle' | 'loading' | 'done' | 'error'
-  const [claimError, setClaimError] = useState('')
-
   const [location, setLocation] = useState(null)
   const [locating, setLocating] = useState(false)
   const [locationError, setLocationError] = useState('')
@@ -701,6 +507,8 @@ export default function Help() {
   const [searchError, setSearchError] = useState('')
   const [searchSuggestions, setSearchSuggestions] = useState([])
   const [searchSuggestLoading, setSearchSuggestLoading] = useState(false)
+  const [activeSuggestion, setActiveSuggestion] = useState(-1)
+  const searchBoxRef = useRef(null)
 
   const [requestId, setRequestId] = useState(null)
   const [requestStatus, setRequestStatus] = useState('idle')
@@ -713,162 +521,33 @@ export default function Help() {
   const [styleOpen, setStyleOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [showMobileForm, setShowMobileForm] = useState(false)
-  const [expertPopupOpen, setExpertPopupOpen] = useState(false)
-  const [expertRecord, setExpertRecord] = useState(() => normalizeExpertVerification(loadExpertVerification()))
+  const [myRequests, setMyRequests] = useState([])
+  const [myRequestsLoading, setMyRequestsLoading] = useState(false)
+  const [showCancelConfirm, setShowCancelConfirm] = useState(null)
 
-  // Offer mode: live requests on the map
   const [openRequests, setOpenRequests] = useState([])
   const [selectedRequest, setSelectedRequest] = useState(null)
   const [offerSubmitting, setOfferSubmitting] = useState(false)
   const [lastOfferReceipt, setLastOfferReceipt] = useState(null)
+  const [trackingRequestId, setTrackingRequestId] = useState(null)
+  const [trackingIndex, setTrackingIndex] = useState(null)
+  const [responderArrived, setResponderArrived] = useState(false)
+  const [requesterLocation, setRequesterLocation] = useState(null)
+  const [zkStatus, setZkStatus] = useState('idle')
+  const [zkLogs, setZkLogs] = useState([])
+  const [zkProof, setZkProof] = useState(null)
+  const [zkError, setZkError] = useState('')
 
   const [walletAddress, setWalletAddress] = useState('')
   const activeWalletAddress = walletAddress
   const isWalletConnected = !!activeWalletAddress
-  const activeExpertRecord = expertRecord?.walletAddress === activeWalletAddress ? expertRecord : null
   const styleSelectorRef = useRef(null)
   const profileRef = useRef(null)
   const sidebarRef = useRef(null)
 
-  // ── ZK proofs ─────────────────────────────────────────────────
-  const [proofs, setProofs] = useState({ location: false, humanity: false, reputation: false })
-
-  function appendZkLog(message) {
-    const at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    const ts = Date.now()
-    setZkLog(prev => {
-      const repeatedRecently = prev.some(entry => entry.message === message && ts - (entry.ts || 0) < 1500)
-      if (repeatedRecently) return prev
-      return [...prev, { id: `${ts}-${prev.length}`, at, message, ts }].slice(-14)
-    })
-  }
-
-  function clearZkLog() {
-    setZkLog([])
-  }
-
-  function startFlowPopup(title, walletAddress = activeWalletAddress, action = '') {
-    setFlowPopupTitle(title)
-    setFlowAction(action)
-    setFlowTxHash('')
-    setFlowActionTxHash('')
-    setFlowProofTxHash('')
-    setFlowWalletAddress(walletAddress || '')
-    setFlowPopupOpen(true)
-  }
-
-  function recordLocalExpertCheckpoint(action, txHash = '', walletAddress = activeWalletAddress) {
-    if (!walletAddress) return null
-    const previous = normalizeExpertVerification(loadExpertVerification(), walletAddress) || {}
-    const historyEntry = {
-      action,
-      txHash: txHash || '',
-      actionTxHash: txHash || '',
-      verificationTxHash: '',
-      proofFingerprint: '',
-      at: new Date().toISOString(),
-    }
-    const next = {
-      walletAddress,
-      verifiedAt: new Date().toISOString(),
-      network: 'testnet',
-      lastAction: action,
-      lastTxHash: txHash || '',
-      actionTxHash: txHash || '',
-      verificationTxHash: '',
-      proofFingerprint: '',
-      proofs: { ...proofs },
-      history: [...(previous.history || []), historyEntry].slice(-10),
-    }
-    localStorage.setItem(EXPERT_STORAGE_KEY, JSON.stringify(next))
-    setExpertRecord(next)
-    return next
-  }
-
-  async function recordExpertVerification(action, txHash = '', proofFingerprint = '', walletAddress = activeWalletAddress) {
-    if (!walletAddress) return null
-    const previous = normalizeExpertVerification(loadExpertVerification(), walletAddress) || {}
-    const actionTxHash = txHash || ''
-    const historyEntry = {
-      action,
-      txHash: actionTxHash,
-      actionTxHash,
-      verificationTxHash: '',
-      proofFingerprint: proofFingerprint || '',
-      at: new Date().toISOString(),
-    }
-    const next = {
-      walletAddress,
-      verifiedAt: new Date().toISOString(),
-      network: 'testnet',
-      lastAction: action,
-      lastTxHash: actionTxHash,
-      actionTxHash,
-      verificationTxHash: '',
-      proofFingerprint: proofFingerprint || '',
-      proofs: { ...proofs },
-      history: [...(previous.history || []), historyEntry].slice(-10),
-    }
-    localStorage.setItem(EXPERT_STORAGE_KEY, JSON.stringify(next))
-    setExpertRecord(next)
-    try {
-      const verificationResult = await writeExpertVerification(walletAddress, action, actionTxHash, proofFingerprint || '', StellarWalletsKit)
-      const verificationTxHash = verificationResult?.hash || ''
-      const completedEntry = {
-        ...historyEntry,
-        txHash: verificationTxHash || actionTxHash,
-        verificationTxHash,
-      }
-      const merged = {
-        ...next,
-        walletAddress,
-        verifiedAt: new Date().toISOString(),
-        lastTxHash: verificationTxHash || actionTxHash,
-        actionTxHash,
-        verificationTxHash,
-        proofs: { ...proofs },
-        history: [...(previous.history || []), completedEntry].slice(-10),
-      }
-      localStorage.setItem(EXPERT_STORAGE_KEY, JSON.stringify(merged))
-      setExpertRecord(merged)
-      return { ...verificationResult, verificationTxHash, actionTxHash }
-    } catch (err) {
-      const message = err?.message || 'On-chain expert verification write failed'
-      console.warn('On-chain expert verification write failed:', message)
-      return { error: message, verificationTxHash: '', actionTxHash }
-    }
-  }
-
   useEffect(() => {
-    setProofs(p => ({ ...p, location: false }))
-    setZkState('idle')
-    setZkError('')
-    setZkProof(null)
-    clearZkLog()
-    setClaimState('idle')
-    setClaimError('')
+    if (!location?.[0] || !location?.[1]) return
   }, [location?.[0], location?.[1]])
-
-  useEffect(() => {
-    if (!isWalletConnected || !activeWalletAddress) {
-      setProofs(p => ({ ...p, humanity: false, reputation: false }))
-      return
-    }
-    let mounted = true
-    async function check() {
-      try {
-        const funded = await ensureAccountFunded(activeWalletAddress)
-        if (mounted) setProofs(p => ({ ...p, humanity: funded }))
-        if (funded) {
-          const ranking = await getRanking()
-          const inRanking = ranking.find(e => e.responder === activeWalletAddress)
-          if (mounted) setProofs(p => ({ ...p, reputation: !!inRanking && inRanking.total_arrivals > 0 }))
-        }
-      } catch {}
-    }
-    check()
-    return () => { mounted = false }
-  }, [isWalletConnected, activeWalletAddress])
 
   useEffect(() => {
     let mounted = true
@@ -900,46 +579,6 @@ export default function Help() {
       offDisconnect()
     }
   }, [])
-
-  useEffect(() => {
-    let mounted = true
-    async function syncExpert() {
-      if (!activeWalletAddress) {
-        const cached = normalizeExpertVerification(loadExpertVerification())
-        if (mounted) setExpertRecord(cached)
-        return
-      }
-      try {
-        const cached = normalizeExpertVerification(loadExpertVerification(), activeWalletAddress)
-        const records = await getExpertVerifications(activeWalletAddress, 10)
-        const history = (records || []).map((record) => normalizeExpertVerification(record, activeWalletAddress)).filter(Boolean)
-        if (history.length && mounted) {
-          const latest = history[history.length - 1]
-          const merged = {
-            ...latest,
-            verificationTxHash: cached?.verificationTxHash || latest.verificationTxHash || '',
-            lastTxHash: cached?.verificationTxHash || latest.lastTxHash || cached?.lastTxHash || '',
-            walletAddress: activeWalletAddress,
-            proofs: cached?.proofs || latest.proofs || {},
-            history: cached?.history?.length ? cached.history : history,
-          }
-          localStorage.setItem(EXPERT_STORAGE_KEY, JSON.stringify(merged))
-          setExpertRecord(merged)
-        } else if (mounted) {
-          const cached = normalizeExpertVerification(loadExpertVerification(), activeWalletAddress)
-          setExpertRecord(cached)
-        }
-      } catch {
-        if (mounted) {
-          const cached = normalizeExpertVerification(loadExpertVerification(), activeWalletAddress)
-          setExpertRecord(cached)
-        }
-      }
-    }
-
-    syncExpert()
-    return () => { mounted = false }
-  }, [activeWalletAddress])
 
   useEffect(() => {
     if (!sidebarRef.current) return
@@ -986,6 +625,7 @@ export default function Help() {
         const data = await res.json()
         if (!mounted) return
         setSearchSuggestions(data.features || [])
+        setActiveSuggestion(-1)
       } catch {
         if (mounted) setSearchSuggestions([])
       } finally {
@@ -999,10 +639,20 @@ export default function Help() {
     }
   }, [searchQuery])
 
-  // Auto-request location on mount
+  useEffect(() => {
+    if (searchSuggestions.length === 0) return
+    function onPointerDown(e) {
+      if (searchBoxRef.current && !searchBoxRef.current.contains(e.target)) {
+        setSearchSuggestions([])
+        setActiveSuggestion(-1)
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [searchSuggestions.length])
+
   useEffect(() => { requestLocation() }, [])
 
-  // Load open requests when in offer mode (poll every 5s)
   useEffect(() => {
     if (mode !== 'offer') return
     let mounted = true
@@ -1014,7 +664,7 @@ export default function Help() {
         for (const id of ids) {
           const req = await getRequest(id)
           if (req && (req.status === 'Pending' || req.status === 'Enroute')) {
-            requests.push(req)
+            requests.push({ ...req, id })
           }
         }
         if (mounted) setOpenRequests(requests)
@@ -1026,7 +676,6 @@ export default function Help() {
     return () => { mounted = false; clearInterval(interval) }
   }, [mode])
 
-  // ── Geolocation ──────────────────────────────────────────────
   function requestLocation() {
     if (!navigator.geolocation) { setLocationError('Browser does not support geolocation. Search by city.'); return }
     setLocating(true)
@@ -1043,131 +692,6 @@ export default function Help() {
     )
   }
 
-  async function handleGenerateProof() {
-    if (!location || !isWalletConnected || !activeWalletAddress) return
-    startFlowPopup('Generating location proof', activeWalletAddress, 'location_proof')
-    clearZkLog()
-    appendZkLog('Starting ZK proof')
-    setZkState('loading')
-    setZkError('')
-    try {
-      const { generateLocationProof } = await import('../lib/zk.js')
-      const result = await generateLocationProof({
-        lat: location[0],
-        lng: location[1],
-        recipientAddress: activeWalletAddress,
-        onLog: appendZkLog,
-      })
-      setZkProof(result)
-      setProofs(p => ({ ...p, location: true }))
-      setZkState('done')
-      appendZkLog('ZK proof ready')
-    } catch (err) {
-      const message = proofFailureSummary(err.message)
-      setZkError(message)
-      setZkState('error')
-      appendZkLog(`Proof generation failed: ${message}`)
-    }
-  }
-
-  async function ensureLocationProof(recipientAddress = activeWalletAddress) {
-    if (!location) throw new Error('Set your location first.')
-    if (!recipientAddress) throw new Error('Connect your Stellar wallet first.')
-    if (!StrKey.isValidEd25519PublicKey(recipientAddress)) {
-      throw new Error('Reconnect a valid Stellar wallet before generating the proof.')
-    }
-    if (zkProof && zkState === 'done') return zkProof
-
-    setZkState('loading')
-    setZkError('')
-    try {
-      const { generateLocationProof } = await import('../lib/zk.js')
-      const result = await generateLocationProof({
-        lat: location[0],
-        lng: location[1],
-        recipientAddress,
-        onLog: appendZkLog,
-      })
-      setZkProof(result)
-      setProofs(p => ({ ...p, location: true }))
-      setZkState('done')
-      appendZkLog('ZK proof ready')
-      return result
-    } catch (err) {
-      const message = proofFailureSummary(err.message)
-      setZkError(message)
-      setZkState('error')
-      appendZkLog(`Proof generation failed: ${message}`)
-      throw new Error(message)
-    }
-  }
-
-  async function runProofAfterRegistration(action, txHash, walletAddress, pinnedLocation = location) {
-    if (!pinnedLocation || !walletAddress) return
-    const locationSnapshot = [pinnedLocation[0], pinnedLocation[1]]
-    setFlowAction(action)
-    setFlowActionTxHash(txHash || '')
-    if (txHash) setFlowTxHash(txHash)
-    setPendingProofRegistration({ action, txHash, walletAddress, location: locationSnapshot })
-    appendZkLog('On-chain registration is done')
-    appendZkLog('Starting ZK proof in the background')
-    setZkState('loading')
-    setZkError('')
-    try {
-      const { generateLocationProof } = await import('../lib/zk.js')
-      const result = await generateLocationProof({
-        lat: pinnedLocation[0],
-        lng: pinnedLocation[1],
-        recipientAddress: walletAddress,
-        onLog: appendZkLog,
-      })
-      setZkProof(result)
-      setProofs(p => ({ ...p, location: true }))
-      setZkState('done')
-      appendZkLog('ZK proof ready')
-      appendZkLog('Recording ZK proof checkpoint on Stellar')
-      const verification = await recordExpertVerification(`${action}_zk_proof`, txHash, result?.nullifier || '', walletAddress)
-      if (verification?.verificationTxHash || verification?.hash) {
-        const proofTx = verification.verificationTxHash || verification.hash
-        setFlowTxHash(proofTx)
-        setFlowProofTxHash(proofTx)
-        appendZkLog('ZK proof registered on Stellar')
-        setPendingProofRegistration(null)
-      } else if (verification?.error) {
-        throw new Error(`ZK checkpoint transaction failed: ${verification.error}`)
-      } else {
-        throw new Error('ZK proof was generated, but the Stellar checkpoint transaction was not confirmed.')
-      }
-    } catch (err) {
-      const message = proofFailureSummary(err.message)
-      setZkError(`The help action is already registered. ZK proof is pending: ${message}`)
-      setZkState('error')
-      appendZkLog(`ZK checkpoint pending: ${message}`)
-      appendZkLog('Help is registered on Stellar; press Retry ZK to finish the checkpoint')
-    }
-  }
-
-  function retryPendingProofRegistration() {
-    if (!pendingProofRegistration) {
-      setZkState('idle')
-      setZkError('')
-      return
-    }
-    clearZkLog()
-    setFlowPopupTitle('Completing ZK checkpoint')
-    setFlowAction(pendingProofRegistration.action || '')
-    setFlowActionTxHash(pendingProofRegistration.txHash || '')
-    setFlowTxHash(pendingProofRegistration.txHash || '')
-    setFlowWalletAddress(pendingProofRegistration.walletAddress || '')
-    setFlowPopupOpen(true)
-    void runProofAfterRegistration(
-      pendingProofRegistration.action,
-      pendingProofRegistration.txHash,
-      pendingProofRegistration.walletAddress,
-      pendingProofRegistration.location
-    )
-  }
-
   async function promptWalletConnection() {
     try {
       const { address } = await StellarWalletsKit.authModal()
@@ -1181,31 +705,6 @@ export default function Help() {
       }
     }
     return ''
-  }
-
-  async function handleClaimAid() {
-    const address = activeWalletAddress || await promptWalletConnection()
-    if (!zkProof || !address) {
-      return
-    }
-    startFlowPopup('Claiming aid on Stellar', address, 'aid_claimed')
-    setClaimState('loading')
-    setClaimError('')
-    try {
-      const result = await claimAid(address, zkProof.publicInputsBytes, zkProof.proof, StellarWalletsKit)
-      setFlowTxHash(result.hash || '')
-      setFlowActionTxHash(result.hash || '')
-      const verification = await recordExpertVerification('aid_claimed', result.hash, zkProof?.nullifier || '', address)
-      if (verification?.verificationTxHash || verification?.hash) {
-        const proofTx = verification.verificationTxHash || verification.hash
-        setFlowProofTxHash(proofTx)
-        setFlowTxHash(proofTx)
-      }
-      setClaimState('done')
-    } catch (err) {
-      setClaimError(err.message || 'Claim failed')
-      setClaimState('error')
-    }
   }
 
   async function handleSearch(e) {
@@ -1236,91 +735,201 @@ export default function Help() {
     setLocationError('')
     setSearchQuery(feature.place_name || feature.text || '')
     setSearchSuggestions([])
+    setActiveSuggestion(-1)
     setSearchError('')
   }
 
-  // ── Submit request (Get Help) ─────────────────────────────────
+  function handleSearchKeyDown(e) {
+    if (searchSuggestions.length === 0) return
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setActiveSuggestion(i => (i + 1) % searchSuggestions.length)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setActiveSuggestion(i => (i <= 0 ? searchSuggestions.length - 1 : i - 1))
+    } else if (e.key === 'Enter') {
+      if (activeSuggestion >= 0 && searchSuggestions[activeSuggestion]) {
+        e.preventDefault()
+        selectSearchSuggestion(searchSuggestions[activeSuggestion])
+      }
+    } else if (e.key === 'Escape') {
+      setSearchSuggestions([])
+      setActiveSuggestion(-1)
+    }
+  }
+
+  function validLocation() {
+    return location && Number.isFinite(location[0]) && Number.isFinite(location[1])
+  }
+
+  function pushZkLog(message) {
+    setZkLogs(prev => [...prev.slice(-5), message])
+  }
+
+  function resetZkCheckpoint() {
+    setZkStatus('idle')
+    setZkLogs([])
+    setZkProof(null)
+    setZkError('')
+  }
+
+  async function buildPrivacyProof({ scope, lat, lng, campaignId, address, radiusMeters = 3000 }) {
+    const zone = buildLocationProofZone({ lat, lng, radiusMeters })
+    setZkStatus('proving')
+    setZkError('')
+    setZkLogs([])
+    pushZkLog('Preparing private witness')
+    const proof = await generateLocationProof({
+      lat,
+      lng,
+      campaignId,
+      recipientAddress: address,
+      zone,
+      onLog: pushZkLog,
+    })
+    const checkpoint = {
+      scope,
+      campaignId,
+      nullifier: proof.nullifier,
+      proof,
+      zone,
+      createdAt: new Date().toISOString(),
+    }
+    setZkProof(checkpoint)
+    setZkStatus('proved')
+    pushZkLog('Private location proof ready')
+    return checkpoint
+  }
+
+  async function recordZkCheckpoint(address, action, txHash, checkpoint) {
+    if (!checkpoint?.nullifier) return
+    try {
+      setZkStatus('recording')
+      pushZkLog('Writing proof fingerprint to Stellar')
+      const record = await recordExpertVerification(
+        address,
+        action,
+        txHash || '',
+        checkpoint.nullifier,
+        StellarWalletsKit
+      )
+      setZkProof(prev => prev ? { ...prev, recordTxHash: record.hash || '' } : prev)
+      setZkStatus('recorded')
+      pushZkLog('Stellar checkpoint recorded')
+    } catch (err) {
+      setZkStatus('proved')
+      pushZkLog(`Checkpoint record skipped: ${err.message || 'wallet rejected'}`)
+    }
+  }
+
   async function handleSubmit() {
-    if (!location) { setSubmitError('Set your location first.'); return }
+    if (!validLocation()) { setSubmitError('Set your location first.'); return }
     if (!emergencyType) { setSubmitError('Select what happened.'); return }
     const address = activeWalletAddress || await promptWalletConnection()
     if (!address) {
       setSubmitError('Connect your Stellar wallet first.')
       return
     }
-    clearZkLog()
-    startFlowPopup('Requesting help', address, 'request_created')
     setSubmitting(true); setSubmitError('')
+    resetZkCheckpoint()
     try {
-      appendZkLog('Checking Stellar testnet account')
       await ensureAccountFunded(address)
-      appendZkLog('Creating on-chain help request')
+      const campaignId = proofCampaignId(`request:${address}:${Date.now()}`)
+      const checkpoint = await buildPrivacyProof({
+        scope: 'Private request',
+        lat: location[0],
+        lng: location[1],
+        campaignId,
+        address,
+        radiusMeters: 3000,
+      })
+      const publicLocation = anonymizeLocation(location)
       const { requestId: id, hash } = await createRequest(
         address,
-        location[0], location[1],
+        publicLocation[0], publicLocation[1],
         emergencyType,
-        profile.nickname || '',
-        profile.contact || '',
+        '',
+        '',
         StellarWalletsKit
       )
-      setFlowTxHash(hash || '')
-      setFlowActionTxHash(hash || '')
       setRequestId(id)
       setRequestStatus('Pending')
-      appendZkLog('Request registered on Stellar')
-      appendZkLog('Action receipt is available on Stellar Expert')
-      recordLocalExpertCheckpoint('request_created', hash, address)
-      void runProofAfterRegistration('request_created', hash, address, [...location])
+      saveMyRequestId(id)
+      setZkProof(prev => prev ? { ...prev, requestId: id, txHash: hash } : prev)
+      await recordZkCheckpoint(address, 'private_request_proof', hash, checkpoint)
     } catch (err) {
+      setZkStatus('error')
+      setZkError(err.message || 'ZK proof failed')
       setSubmitError('Could not send. ' + (err.message || ''))
     }
     setSubmitting(false)
   }
 
-  // ── Offer Help — accept a request ────────────────────────────
+  async function handleCancel(requestId) {
+    const address = activeWalletAddress
+    if (!address) return
+    setShowCancelConfirm(null)
+    const prevStatus = requestStatus
+    try {
+      await cancelRequest(address, requestId, StellarWalletsKit)
+      setRequestStatus('Cancelled')
+    } catch (err) {
+      setRequestStatus(prevStatus)
+    }
+  }
+
   async function handleOffer(req) {
-    if (!location) { alert('Enable your location first so the requester can see you on the map.'); return }
+    if (!validLocation()) { alert('Enable your location first so the requester can see you on the map.'); return }
+    const reqId = Number(req.id)
+    if (!Number.isFinite(reqId)) { alert('Invalid request'); return }
     const address = activeWalletAddress || await promptWalletConnection()
     if (!address) {
       return
     }
     setOfferSubmitting(true)
+    resetZkCheckpoint()
     try {
-      clearZkLog()
-      startFlowPopup('Offering help', address, 'aid_offered')
-      appendZkLog('Checking Stellar testnet account')
       await ensureAccountFunded(address)
-      const eta = Math.round(Math.random() * 480 + 180) // 3–11 min in seconds
-      appendZkLog('Accepting request on-chain')
+      const checkpoint = await buildPrivacyProof({
+        scope: 'Private responder',
+        lat: location[0],
+        lng: location[1],
+        campaignId: proofCampaignId(`offer:${reqId}`),
+        address,
+        radiusMeters: 3000,
+      })
+      const eta = Math.round(Math.random() * 480 + 180)
+      const publicLocation = anonymizeLocation(location)
       const result = await acceptRequest(
         address,
-        req.id,
-        location[0], location[1],
+        reqId,
+        publicLocation[0], publicLocation[1],
         eta,
         StellarWalletsKit
       )
-      setFlowTxHash(result.hash || '')
-      setFlowActionTxHash(result.hash || '')
       setSelectedRequest(null)
       setLastOfferReceipt({
-        requestId: req.id,
-        nickname: req.nickname || 'Anonymous',
+        requestId: reqId,
+        label: privateRequestLabel(reqId),
         emergencyType: req.emergency_type,
         txHash: result.hash || '',
+        proofId: checkpoint.nullifier,
         at: new Date().toISOString(),
       })
-      setOpenRequests(prev => prev.filter(r => r.id !== req.id))
-      appendZkLog('Offer registered on Stellar')
-      appendZkLog('Action receipt is available on Stellar Expert')
-      recordLocalExpertCheckpoint('aid_offered', result.hash, address)
-      void runProofAfterRegistration('aid_offered', result.hash, address, [...location])
+      setZkProof(prev => prev ? { ...prev, requestId: reqId, txHash: result.hash || '' } : prev)
+      await recordZkCheckpoint(address, 'private_responder_proof', result.hash || '', checkpoint)
+      setOpenRequests(prev => prev.filter(r => r.id !== reqId))
+      if (req.lat != null && req.lng != null) {
+        setRequesterLocation([req.lat, req.lng])
+      }
     } catch (err) {
+      setZkStatus('error')
+      setZkError(err.message || 'ZK proof failed')
       alert('Could not accept request: ' + (err.message || ''))
     }
     setOfferSubmitting(false)
   }
 
-  // ── Poll responders (Get Help mode, replaces Supabase realtime) ───
   useEffect(() => {
     if (!requestId) return
     let mounted = true
@@ -1328,16 +937,28 @@ export default function Help() {
     async function poll() {
       try {
         const count = await getResponderCount(requestId)
+        let found = false
         for (let i = 0; i < count; i++) {
           const r = await getResponder(requestId, i)
           if (!r) continue
+          found = true
           if (mounted) {
             setResponders(prev => {
-              if (prev.find(p => p.responder === r.responder)) return prev
+              const idx = prev.findIndex(p => p.responder === r.responder)
+              if (idx >= 0) {
+                const next = [...prev]
+                next[idx] = r
+                return next
+              }
               return [...prev, r]
             })
             setRequestStatus('Enroute')
+            setTrackingIndex(i)
+            if (r.arrived) setResponderArrived(true)
           }
+        }
+        if (!found && mounted) {
+          setResponders([])
         }
       } catch (_) {}
     }
@@ -1347,11 +968,71 @@ export default function Help() {
     return () => { mounted = false; clearInterval(interval) }
   }, [requestId])
 
-  // ── Derived ──────────────────────────────────────────────────
+  useEffect(() => {
+    if (!lastOfferReceipt || responderArrived) return
+    let mounted = true
+    async function ping() {
+      if (!validLocation()) return
+      try {
+        await updateLocation(
+          activeWalletAddress,
+          lastOfferReceipt.requestId,
+          location[0], location[1]
+        )
+      } catch (_) {}
+    }
+    ping()
+    const interval = setInterval(ping, 5000)
+    return () => { mounted = false; clearInterval(interval) }
+  }, [lastOfferReceipt?.requestId, location?.[0], location?.[1], responderArrived])
+
+  useEffect(() => {
+    if (!lastOfferReceipt) return
+    let mounted = true
+    async function fetchRequester() {
+      try {
+        const req = await getRequest(lastOfferReceipt.requestId)
+        if (mounted && req && req.lat != null && req.lng != null) {
+          setRequesterLocation([req.lat, req.lng])
+        }
+      } catch {}
+    }
+    fetchRequester()
+    const interval = setInterval(fetchRequester, 8000)
+    return () => { mounted = false; clearInterval(interval) }
+  }, [lastOfferReceipt?.requestId])
+
+  useEffect(() => {
+    if (!activeWalletAddress) { setMyRequests([]); return }
+    let mounted = true
+    async function fetchMyRequests() {
+      const ids = loadMyRequestIds()
+      if (ids.length === 0) { if (mounted) setMyRequests([]); return }
+      setMyRequestsLoading(true)
+      try {
+        const results = await Promise.all(ids.map(id => getRequest(id).catch(() => null)))
+        const filtered = results.filter(r => r && r.requester === activeWalletAddress)
+        filtered.sort((a, b) => b.created_at - a.created_at)
+        if (mounted) setMyRequests(filtered)
+      } catch (_) {}
+      if (mounted) setMyRequestsLoading(false)
+    }
+    fetchMyRequests()
+    const interval = setInterval(fetchMyRequests, 10000)
+    return () => { mounted = false; clearInterval(interval) }
+  }, [activeWalletAddress])
+
+  useEffect(() => {
+    setTrackingRequestId(null)
+    setTrackingIndex(null)
+    setResponderArrived(false)
+    setResponders([])
+  }, [mode, requestId])
+
   const step1Done = !!location
   const step2Done = !!emergencyType
-  const step3Done = profile.nickname && profile.contact
-  const currentStep = !step1Done ? 1 : requestStatus === 'idle' ? (!step2Done ? 2 : step3Done ? 4 : 3) : 5
+  const step3Done = true
+  const currentStep = !step1Done ? 1 : requestStatus === 'idle' ? (!step2Done ? 2 : 4) : 5
 
   const myChar = selectedChar || pickChar('default', profile.nickname || 'me')
 
@@ -1366,6 +1047,8 @@ export default function Help() {
   const isGetMode = mode === 'get'
   const accentColor = isGetMode ? '#FF7A6B' : '#7357FF'
 
+  const showTracking = (requestStatus === 'Enroute' && responders.length > 0) || (lastOfferReceipt && !responderArrived)
+
   const S = {
     input: { width: '100%', padding: '9px 11px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '8px', color: 'rgba(242,236,220,0.9)', fontSize: '13px', outline: 'none', boxSizing: 'border-box' },
     btnGhost: { padding: '8px 12px', background: 'rgba(255,255,255,0.08)', color: 'rgba(242,236,220,0.8)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '8px', fontSize: '12px', cursor: 'pointer', width: '100%' },
@@ -1376,7 +1059,6 @@ export default function Help() {
   return (
     <div id="helphone-help-wrap" style={{ display: 'flex', height: '100vh', fontFamily: "'Inter','Helvetica Neue',sans-serif" }}>
 
-      {/* ── SIDEBAR ──────────────────────────────────────────── */}
       <aside ref={sidebarRef} id="helphone-help-sidebar" style={{
         width: '340px', minWidth: '340px', background: '#234B4E',
         color: 'rgba(242,236,220,0.9)', display: 'flex', flexDirection: 'column',
@@ -1384,7 +1066,6 @@ export default function Help() {
       }}>
         <div style={{ padding: '20px 20px 36px' }}>
 
-          {/* Logo + back */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
             <Link to="/" style={{ fontFamily: "'Instrument Serif',serif", fontSize: '20px', textDecoration: 'none', display: 'flex' }}>
               <span style={{ color: '#F4ECDC', fontStyle: 'italic' }}>Hel</span>
@@ -1393,7 +1074,6 @@ export default function Help() {
             <Link to="/" style={{ fontSize: '12px', color: 'rgba(242,236,220,0.35)', textDecoration: 'none' }}>← Back</Link>
           </div>
 
-          {/* ── Mode toggle ── */}
           <div style={{
             display: 'grid', gridTemplateColumns: '1fr 1fr',
             gap: '6px', marginBottom: '24px',
@@ -1410,19 +1090,84 @@ export default function Help() {
             ))}
           </div>
 
+          <div style={{
+            padding: '12px 13px',
+            borderRadius: '12px',
+            marginBottom: '18px',
+            background: 'linear-gradient(135deg, rgba(115,87,255,0.16), rgba(63,132,135,0.12))',
+            border: '1px solid rgba(179,166,255,0.22)'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+              <span style={{
+                width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
+                background: zkStatus === 'error' ? '#FF7A6B' : zkStatus === 'idle' ? 'rgba(242,236,220,0.28)' : '#B3A6FF',
+                animation: zkStatus === 'proving' || zkStatus === 'recording' ? 'mdblink 1.2s steps(1) infinite' : 'none'
+              }} />
+              <span style={{ fontSize: '11px', fontWeight: 900, letterSpacing: '1.25px', color: '#B3A6FF' }}>
+                ZK PRIVACY CHECKPOINT
+              </span>
+              <span style={{
+                marginLeft: 'auto',
+                padding: '2px 7px',
+                borderRadius: '999px',
+                background: 'rgba(255,255,255,0.08)',
+                color: zkStatus === 'error' ? '#FF7A6B' : 'rgba(242,236,220,0.62)',
+                fontSize: '9px',
+                fontWeight: 800,
+                letterSpacing: '0.6px',
+                textTransform: 'uppercase'
+              }}>
+                {zkStatus === 'idle' ? 'ready' : zkStatus}
+              </span>
+            </div>
+            <p style={{ margin: '0 0 8px', fontSize: '11px', color: 'rgba(242,236,220,0.52)', lineHeight: 1.45 }}>
+              Exact location stays private. Stellar sees a proof fingerprint, a zone, and a pseudonymous wallet action.
+            </p>
+            {zkProof?.nullifier && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '7px', marginBottom: '8px' }}>
+                <div style={{ padding: '7px 8px', borderRadius: '8px', background: 'rgba(0,0,0,0.16)', border: '1px solid rgba(255,255,255,0.06)' }}>
+                  <div style={{ fontSize: '8px', letterSpacing: '0.9px', color: 'rgba(242,236,220,0.28)', marginBottom: '3px' }}>NULLIFIER</div>
+                  <div style={{ fontSize: '10px', color: '#F4ECDC', fontFamily: "'Courier New', monospace", overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {shortProofId(zkProof.nullifier)}
+                  </div>
+                </div>
+                <div style={{ padding: '7px 8px', borderRadius: '8px', background: 'rgba(0,0,0,0.16)', border: '1px solid rgba(255,255,255,0.06)' }}>
+                  <div style={{ fontSize: '8px', letterSpacing: '0.9px', color: 'rgba(242,236,220,0.28)', marginBottom: '3px' }}>ZONE</div>
+                  <div style={{ fontSize: '10px', color: '#F4ECDC' }}>
+                    {zkProof.zone?.radiusMeters ? `${Math.round(zkProof.zone.radiusMeters / 1000)} km private box` : 'private box'}
+                  </div>
+                </div>
+              </div>
+            )}
+            {(zkProof?.txHash || zkProof?.recordTxHash) && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '6px' }}>
+                {zkProof?.txHash && (
+                  <ExplorerLink label="On-chain action" hash={zkProof.txHash} />
+                )}
+                {zkProof?.recordTxHash && (
+                  <ExplorerLink label="Proof record" hash={zkProof.recordTxHash} />
+                )}
+              </div>
+            )}
+            {zkError && <div style={{ fontSize: '10px', color: '#FF7A6B', lineHeight: 1.35, marginBottom: '6px' }}>{zkError}</div>}
+            {zkLogs.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                {zkLogs.slice(-3).map((line, i) => (
+                  <div key={`${line}-${i}`} style={{ fontSize: '9.5px', color: 'rgba(242,236,220,0.34)', lineHeight: 1.35 }}>
+                    {line}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
-
-          {/* ── GET HELP mode ── */}
           {isGetMode && (
             <>
               {requestStatus === 'idle' ? (
                 <div style={{ marginBottom: '20px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '7px', marginBottom: '5px' }}>
-                    <h2 style={{ margin: 0, fontFamily: "'Instrument Serif',serif", fontWeight: 400, fontSize: '20px', color: '#F4ECDC', lineHeight: 1.2 }}>
-                      Request help nearby
-                    </h2>
-                    <HelpTip label="Request help flow help">Requesting help creates a public Stellar request. Your wallet signs it, then the Action TX receipt appears, followed by the ZK checkpoint.</HelpTip>
-                  </div>
+                  <h2 style={{ margin: 0, fontFamily: "'Instrument Serif',serif", fontWeight: 400, fontSize: '20px', color: '#F4ECDC', lineHeight: 1.2 }}>
+                    Request help nearby
+                  </h2>
                   <p style={{ margin: 0, fontSize: '12px', color: 'rgba(242,236,220,0.4)', lineHeight: 1.5 }}>
                     Fill in the steps below. Nearby people will be notified.
                   </p>
@@ -1437,14 +1182,28 @@ export default function Help() {
                     )}
                   </div>
                   <p style={{ margin: 0, fontSize: '12px', color: 'rgba(242,236,220,0.45)', lineHeight: 1.4 }}>{statusInfo?.msg}</p>
+                  {requestStatus === 'Enroute' && responders[0] && (
+                    <div style={{ marginTop: '8px', padding: '8px 10px', borderRadius: '8px', background: 'rgba(115,87,255,0.08)', border: '1px solid rgba(115,87,255,0.2)' }}>
+                      <div style={{ fontSize: '10px', fontWeight: 600, color: '#B3A6FF', marginBottom: '4px' }}>
+                        RESPONDER {responderArrived ? 'ARRIVED ✓' : 'EN ROUTE'}
+                      </div>
+                      <div style={{ fontSize: '11px', color: 'rgba(242,236,220,0.65)', lineHeight: 1.5 }}>
+                        {responders[0].responder?.slice(0, 8)}…
+                        {responders[0].eta_seconds && !responderArrived && (
+                          <> · ETA {Math.round(responders[0].eta_seconds / 60)} min</>
+                        )}
+                        {location && responders[0] && (
+                          <> · {Math.round(distance(location, [responders[0].lat, responders[0].lng]) * 10) / 10} km away</>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
-              {/* Step 1: Location */}
               <Step n="1" title="Your location"
                 subtitle={locating ? 'Requesting…' : location ? `${location[0].toFixed(4)}, ${location[1].toFixed(4)}` : 'Not set'}
                 done={step1Done} active={currentStep === 1 || (!step1Done && requestStatus === 'idle')}
-                help="Your location sets the map pin and the private inputs for the proof. You can use GPS, search for a place, or click the map."
               >
                 {requestStatus === 'idle' && (
                   <>
@@ -1459,13 +1218,24 @@ export default function Help() {
                         <button onClick={requestLocation} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'rgba(242,236,220,0.35)', fontSize: '11px', cursor: 'pointer', padding: 0 }}>refresh</button>
                       </div>
                     )}
-                    <form onSubmit={handleSearch} style={{ display: 'flex', gap: '6px', position: 'relative' }}>
-                      <input style={S.input} placeholder="Or search city, country…" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} autoComplete="off" />
+                    <form ref={searchBoxRef} onSubmit={handleSearch} style={{ display: 'flex', gap: '6px', position: 'relative' }}>
+                      <input
+                        style={S.input}
+                        placeholder="Or search city, country…"
+                        value={searchQuery}
+                        onChange={e => setSearchQuery(e.target.value)}
+                        onKeyDown={handleSearchKeyDown}
+                        autoComplete="off"
+                        role="combobox"
+                        aria-expanded={searchSuggestions.length > 0}
+                        aria-controls="hp-search-suggestions"
+                        aria-activedescendant={activeSuggestion >= 0 ? `hp-suggestion-${activeSuggestion}` : undefined}
+                      />
                       <button type="submit" style={{ padding: '9px 12px', background: '#FF7A6B', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: '600', cursor: 'pointer' }} disabled={searchLoading}>
                         {searchLoading ? '…' : 'Go'}
                       </button>
                       {(searchSuggestions.length > 0 || searchSuggestLoading) && searchQuery.trim() && (
-                        <div style={{
+                        <div id="hp-search-suggestions" role="listbox" style={{
                           position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0, zIndex: 20,
                           background: '#1c2c24', border: '1px solid rgba(255,255,255,0.08)',
                           borderRadius: '10px', overflow: 'hidden', boxShadow: '0 10px 28px rgba(0,0,0,0.35)'
@@ -1475,18 +1245,21 @@ export default function Help() {
                               Searching references...
                             </div>
                           )}
-                          {searchSuggestions.map((feature) => (
+                          {searchSuggestions.map((feature, idx) => (
                             <button
                               key={feature.id}
+                              id={`hp-suggestion-${idx}`}
+                              role="option"
+                              aria-selected={idx === activeSuggestion}
                               type="button"
                               onClick={() => selectSearchSuggestion(feature)}
+                              onMouseMove={() => setActiveSuggestion(idx)}
                               style={{
                                 width: '100%', padding: '10px 12px', border: 'none',
-                                background: 'transparent', color: 'rgba(242,236,220,0.9)',
+                                background: idx === activeSuggestion ? 'rgba(255,255,255,0.07)' : 'transparent',
+                                color: 'rgba(242,236,220,0.9)',
                                 textAlign: 'left', cursor: 'pointer', display: 'block'
                               }}
-                              onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
-                              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
                             >
                               <div style={{ fontSize: '12px', fontWeight: 600, lineHeight: 1.3 }}>{feature.place_name}</div>
                               <div style={{ fontSize: '10px', color: 'rgba(242,236,220,0.34)', marginTop: '2px' }}>
@@ -1503,10 +1276,8 @@ export default function Help() {
                 )}
               </Step>
 
-              {/* Step 2: What happened */}
               <Step n="2" title="What happened?" subtitle={step2Done ? EMERGENCY_TYPES.find(e => e.id === emergencyType)?.label : 'Select one'}
                 done={step2Done} active={currentStep === 2 && requestStatus === 'idle'}
-                help="This describes what kind of help is needed. It is registered with the request so helpers understand the situation."
               >
                 {requestStatus === 'idle' && !step2Done && (
                   <button onClick={() => setShowEmergencyModal(true)} style={{
@@ -1532,10 +1303,8 @@ export default function Help() {
                 })()}
               </Step>
 
-              {/* Step 3: Your info */}
               <Step n="3" title="Your info" subtitle={step3Done ? `${profile.nickname} · ${profile.contact}` : 'Optional — how responders reach you'}
                 done={step3Done} active={currentStep === 3 && requestStatus === 'idle'}
-                help="Your nickname and contact help responders coordinate. Contact is stored in the on-chain action, so use something you are comfortable sharing."
               >
                 {requestStatus === 'idle' && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '4px' }}>
@@ -1550,10 +1319,8 @@ export default function Help() {
                 )}
               </Step>
 
-              {/* Step 4: Send */}
               <Step n="4" title="Send request" subtitle={step1Done && step2Done ? 'Ready to go' : 'Complete the steps above'}
                 done={requestStatus !== 'idle'} active={currentStep === 4 && requestStatus === 'idle'}
-                help="If no wallet is connected, this button opens Stellar Wallets Kit. The receipt appears only after Stellar confirms the transaction."
               >
                 {requestStatus === 'idle' && (
                   <>
@@ -1565,23 +1332,18 @@ export default function Help() {
                       {submitting ? 'Sending…' : !isWalletConnected ? 'Connect wallet first' : 'Request help'}
                     </button>
                     {submitError && <p style={S.errorMsg}>{submitError}</p>}
-                    <ZkProgressLog entries={zkLog} active={submitting || zkState === 'loading'} />
                   </>
                 )}
               </Step>
             </>
           )}
 
-          {/* ── OFFER HELP mode ── */}
           {!isGetMode && (
             <>
               <div style={{ marginBottom: '20px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '7px', marginBottom: '5px' }}>
-                  <h2 style={{ margin: 0, fontFamily: "'Instrument Serif',serif", fontWeight: 400, fontSize: '20px', color: '#F4ECDC', lineHeight: 1.2 }}>
-                    People who need help
-                  </h2>
-                  <HelpTip label="Offer help flow help">Offering help accepts a request on Stellar. That creates a receipt for the helper and shows their responder pin.</HelpTip>
-                </div>
+                <h2 style={{ margin: 0, fontFamily: "'Instrument Serif',serif", fontWeight: 400, fontSize: '20px', color: '#F4ECDC', lineHeight: 1.2 }}>
+                  People who need help
+                </h2>
                 <p style={{ margin: 0, fontSize: '12px', color: 'rgba(242,236,220,0.4)', lineHeight: 1.5 }}>
                   {openRequests.length === 0 ? 'No one nearby needs help right now.' : `${openRequests.length} active request${openRequests.length > 1 ? 's' : ''} on the map. Tap a pin to help.`}
                 </p>
@@ -1595,31 +1357,39 @@ export default function Help() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
                     <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#7357FF', flexShrink: 0 }} />
                     <span style={{ fontSize: '11px', fontWeight: 800, letterSpacing: '1.2px', color: '#B3A6FF' }}>HELP REGISTERED</span>
-                    <HelpTip label="Helper receipt help">This is the helper receipt. It is not the wallet account page: it opens the help transaction or the ZK checkpoint once it is ready.</HelpTip>
                   </div>
                   <p style={{ margin: '0 0 9px', fontSize: '12px', color: 'rgba(242,236,220,0.52)', lineHeight: 1.45 }}>
-                    You are helping {lastOfferReceipt.nickname}. This receipt is public and checkable on Stellar.
+                    You are helping {lastOfferReceipt.label || 'this person'}. Your location is being shared with them.
                   </p>
+                  {lastOfferReceipt.txHash && (
+                    <div style={{ marginBottom: '9px' }}>
+                      <ExplorerLink label="On-chain action" hash={lastOfferReceipt.txHash} />
+                    </div>
+                  )}
                   <div style={{ display: 'flex', gap: '8px' }}>
-                    <a
-                      href={stellarExpertTxUrl(flowProofTxHash || lastOfferReceipt.txHash) || stellarExpertAccountUrl(activeWalletAddress)}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{
+                    {responderArrived ? (
+                      <div style={{
                         flex: 1, padding: '8px 10px', borderRadius: '8px',
-                        background: '#7357FF', color: '#fff', textDecoration: 'none',
-                        fontSize: '11px', fontWeight: 800, textAlign: 'center'
-                      }}
-                    >
-                      View receipt
-                    </a>
-                    {pendingProofRegistration?.action === 'aid_offered' && zkState === 'error' && (
-                      <button onClick={retryPendingProofRegistration} style={{
-                        padding: '8px 10px', borderRadius: '8px', border: '1px solid rgba(255,122,107,0.25)',
-                        background: 'rgba(255,122,107,0.12)', color: '#FF7A6B',
+                        background: 'rgba(63,132,135,0.15)', color: '#3F8487',
+                        fontSize: '11px', fontWeight: 800, textAlign: 'center', border: '1px solid rgba(63,132,135,0.3)'
+                      }}>
+                        ARRIVED ✓
+                      </div>
+                    ) : (
+                      <button onClick={async () => {
+                        if (!lastOfferReceipt) return
+                        try {
+                          await markArrived(activeWalletAddress, lastOfferReceipt.requestId, StellarWalletsKit)
+                          setResponderArrived(true)
+                        } catch (err) {
+                          alert('Could not mark arrived: ' + (err.message || ''))
+                        }
+                      }} style={{
+                        flex: 1, padding: '8px 10px', borderRadius: '8px', border: '1px solid rgba(63,132,135,0.25)',
+                        background: 'rgba(63,132,135,0.12)', color: '#3F8487',
                         fontSize: '11px', fontWeight: 800, cursor: 'pointer'
                       }}>
-                        Retry ZK
+                        Mark Arrived
                       </button>
                     )}
                   </div>
@@ -1628,7 +1398,6 @@ export default function Help() {
 
               <div style={S.divider} />
 
-              {/* Selected request detail */}
               {selectedRequest ? (
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px' }}>
@@ -1654,11 +1423,9 @@ export default function Help() {
                     {offerSubmitting ? 'Confirming…' : !isWalletConnected ? 'Connect wallet first' : 'I\'ll help this person'}
                   </button>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '8px', color: 'rgba(242,236,220,0.34)', fontSize: '11px', lineHeight: 1.45 }}>
-                    <HelpTip label="Help offer button help">When you confirm, you sign an `accept_request` transaction. That hash is your public helper receipt.</HelpTip>
                     <span>Helping creates your own public receipt after Stellar confirms.</span>
                   </div>
                   {!location && <p style={S.errorMsg}>Enable your location so they can see you on the map.</p>}
-                  <ZkProgressLog entries={zkLog} active={offerSubmitting || zkState === 'loading'} />
                 </div>
               ) : (
                 <div>
@@ -1688,10 +1455,87 @@ export default function Help() {
               )}
             </>
           )}
+
+          {isWalletConnected && (
+            <>
+              <div style={S.divider} />
+              <div>
+                <div style={{ fontSize: '11px', letterSpacing: '1.5px', fontWeight: '600', color: '#3F8487', marginBottom: '10px' }}>
+                  MY REQUESTS {myRequests.length > 0 && <span style={{ color: 'rgba(242,236,220,0.3)' }}>({myRequests.length})</span>}
+                </div>
+                {myRequestsLoading && myRequests.length === 0 ? (
+                  <p style={{ fontSize: '12px', color: 'rgba(242,236,220,0.3)' }}>Loading...</p>
+                ) : myRequests.length === 0 ? (
+                  <p style={{ fontSize: '12px', color: 'rgba(242,236,220,0.3)' }}>You haven&apos;t requested help yet.</p>
+                ) : (
+                  myRequests.slice(0, 10).map(req => {
+                    const isActive = req.id === requestId
+                    const statusColors = {
+                      Pending: { color: '#a2a586', bg: 'rgba(162,165,134,0.15)' },
+                      Enroute: { color: '#7357FF', bg: 'rgba(115,87,255,0.15)' },
+                      Resolved: { color: '#3F8487', bg: 'rgba(63,132,135,0.15)' },
+                      Cancelled: { color: 'rgba(242,236,220,0.3)', bg: 'rgba(255,255,255,0.04)' },
+                    }
+                    const sc = statusColors[req.status] || statusColors.Cancelled
+                    const et = EMERGENCY_TYPES.find(e => e.id === req.emergency_type)
+                    const timeAgo = req.created_at
+                      ? (() => { const d = Math.floor((Date.now() / 1000 - req.created_at) / 60); return d < 1 ? 'just now' : d < 60 ? `${d}m ago` : `${Math.floor(d / 60)}h ago` })()
+                      : ''
+                    return (
+                      <div key={req.id} onClick={() => {
+                        if (req.status === 'Pending' || req.status === 'Enroute') {
+                          setRequestId(req.id)
+                          setRequestStatus(req.status)
+                        }
+                      }} style={{
+                        padding: '10px 12px', marginBottom: '8px', borderRadius: '10px', cursor: 'pointer',
+                        background: isActive ? 'rgba(63,132,135,0.12)' : 'rgba(255,255,255,0.04)',
+                        border: isActive ? '1px solid rgba(63,132,135,0.3)' : '1px solid rgba(255,255,255,0.06)',
+                        transition: 'background 0.15s',
+                      }}
+                        onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'rgba(255,255,255,0.07)' }}
+                        onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'rgba(255,255,255,0.04)' }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                              <span style={{ fontSize: '12px', fontWeight: '600', color: '#F4ECDC' }}>#{req.id}</span>
+                              <span style={{
+                                fontSize: '9px', fontWeight: '700', padding: '2px 6px', borderRadius: '4px',
+                                background: sc.bg, color: sc.color, letterSpacing: '0.5px',
+                              }}>
+                                {req.status?.toUpperCase()}
+                              </span>
+                            </div>
+                            <div style={{ fontSize: '10px', color: 'rgba(242,236,220,0.35)', marginTop: '3px', lineHeight: 1.4 }}>
+                              {et ? `${et.icon} ${et.label}` : req.emergency_type || 'Unknown'}
+                              {timeAgo && <span style={{ marginLeft: '6px', color: 'rgba(242,236,220,0.2)' }}>· {timeAgo}</span>}
+                            </div>
+                          </div>
+                          {isActive && req.status === 'Pending' && (
+                            <button
+                              onClick={e => { e.stopPropagation(); setShowCancelConfirm(req.id) }}
+                              style={{
+                                padding: '5px 9px', borderRadius: '6px', flexShrink: 0,
+                                background: 'rgba(255,122,107,0.12)', border: '1px solid rgba(255,122,107,0.25)',
+                                color: '#FF7A6B', fontSize: '10px', fontWeight: '700', cursor: 'pointer',
+                                lineHeight: 1,
+                              }}
+                            >
+                              Cancel
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })
+                )}
+              </div>
+            </>
+          )}
         </div>
       </aside>
 
-      {/* ── MAP ──────────────────────────────────────────────── */}
       <div id="helphone-help-map" style={{ flex: 1, position: 'relative' }}>
         <Map
           mapboxAccessToken={MAPBOX_TOKEN}
@@ -1707,7 +1551,6 @@ export default function Help() {
           {location && <MapController center={location} zoom={14} />}
           <NavigationControl position="bottom-right" />
 
-          {/* My location marker (Get Help) */}
           {isGetMode && location && (
             <CharMarker charName={myChar} accentColor="#FF7A6B" lat={location[0]} lng={location[1]}
               onClick={() => setPopupMarker(p => p === 'user' ? null : 'user')}>
@@ -1720,7 +1563,6 @@ export default function Help() {
             </CharMarker>
           )}
 
-          {/* My location marker (Offer Help) */}
           {!isGetMode && location && (
             <CharMarker charName={myChar} accentColor="#7357FF" lat={location[0]} lng={location[1]}
               onClick={() => setPopupMarker(p => p === 'responder-me' ? null : 'responder-me')}>
@@ -1733,7 +1575,6 @@ export default function Help() {
             </CharMarker>
           )}
 
-          {/* Responder markers + route lines (Get Help mode) */}
           {isGetMode && location && responders.map(r => (
             <Fragment key={r.id}>
               <CharMarker charName={pickChar('default', r.responder)} accentColor="#7357FF"
@@ -1747,11 +1588,10 @@ export default function Help() {
                   </Popup>
                 )}
               </CharMarker>
-              <RouteLine from={[r.lat, r.lng]} to={location} />
+              <RouteLine id={r.id} from={[r.lat, r.lng]} to={location} />
             </Fragment>
           ))}
 
-          {/* Open request markers (Offer Help mode) */}
           {!isGetMode && openRequests.map(req => (
             <CharMarker key={req.id} charName={pickChar('default', req.id)} accentColor="#FF7A6B"
               lat={req.lat} lng={req.lng}
@@ -1764,9 +1604,54 @@ export default function Help() {
               )}
             </CharMarker>
           ))}
+
+          {showTracking && isGetMode && responders[0] && (
+            <TrackingScreen
+              responderLat={responders[0].lat}
+              responderLng={responders[0].lng}
+              responderAddress={responders[0].responder}
+              responderChar={pickChar('default', responders[0].responder)}
+              requesterLat={location?.[0]}
+              requesterLng={location?.[1]}
+              requesterChar={myChar}
+              etaSeconds={responders[0].eta_seconds}
+              isArrived={responderArrived}
+              isResponderView={false}
+              onResolve={async () => {
+                try {
+                  await resolveRequest(activeWalletAddress, requestId, StellarWalletsKit)
+                  setRequestStatus('Resolved')
+                } catch (err) {
+                  alert('Could not resolve: ' + (err.message || ''))
+                }
+              }}
+            />
+          )}
+
+          {showTracking && !isGetMode && lastOfferReceipt && location && requesterLocation && (
+            <TrackingScreen
+              responderLat={location[0]}
+              responderLng={location[1]}
+              responderAddress={activeWalletAddress}
+              responderChar={myChar}
+              requesterLat={requesterLocation[0]}
+              requesterLng={requesterLocation[1]}
+              requesterChar={pickChar('default', lastOfferReceipt.nickname)}
+              etaSeconds={null}
+              isArrived={responderArrived}
+              isResponderView={true}
+              onMarkArrived={async () => {
+                try {
+                  await markArrived(activeWalletAddress, lastOfferReceipt.requestId, StellarWalletsKit)
+                  setResponderArrived(true)
+                } catch (err) {
+                  alert('Could not mark arrived: ' + (err.message || ''))
+                }
+              }}
+            />
+          )}
         </Map>
 
-        {/* Style selector */}
         <div ref={styleSelectorRef} style={{ position: 'absolute', top: '12px', left: '12px', zIndex: 10 }}>
           <button onClick={() => setStyleOpen(o => !o)} style={{
             padding: '7px 14px', background: '#234B4E', border: '1px solid rgba(255,255,255,0.1)',
@@ -1803,7 +1688,6 @@ export default function Help() {
           )}
         </div>
 
-        {/* Help onboarding button */}
         <button
           type="button"
           aria-label="Open HelPhone help guide"
@@ -1820,7 +1704,6 @@ export default function Help() {
           ?
         </button>
 
-        {/* Profile circle */}
         <div ref={profileRef} style={{ position: 'absolute', top: '12px', right: '12px', zIndex: 10 }}>
           <button onClick={() => {
             if (isWalletConnected) {
@@ -1855,7 +1738,6 @@ export default function Help() {
               border: '1px solid rgba(255,255,255,0.08)', overflow: 'hidden',
               boxShadow: '0 12px 48px rgba(0,0,0,0.6)'
             }}>
-              {/* Profile header card */}
               <div style={{ padding: '20px 20px 16px', background: 'rgba(115,87,255,0.06)', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
                   <div style={{ width: '52px', height: '52px', borderRadius: '12px', overflow: 'hidden', background: '#234B4E', flexShrink: 0, border: '2px solid rgba(115,87,255,0.3)' }}>
@@ -1868,11 +1750,6 @@ export default function Help() {
                     <div style={{ fontSize: '11px', color: 'rgba(242,236,220,0.35)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {activeWalletAddress.slice(0, 8)}...{activeWalletAddress.slice(-6)}
                     </div>
-                    {receiptTxHash(activeExpertRecord) && (
-                      <button onClick={() => setExpertPopupOpen(true)} style={{ marginTop: '8px', padding: '3px 8px', borderRadius: '999px', border: '1px solid rgba(63,132,135,0.25)', background: 'rgba(63,132,135,0.12)', color: '#3F8487', fontSize: '9px', fontWeight: 700, letterSpacing: '0.8px', cursor: 'pointer' }}>
-                        VIEW RECEIPT
-                      </button>
-                    )}
                   </div>
                   <button onClick={async () => { await StellarWalletsKit.disconnect(); setWalletAddress(''); setProfileOpen(false) }} style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px', color: 'rgba(242,236,220,0.35)', fontSize: '13px', cursor: 'pointer', padding: '6px 8px', lineHeight: 1 }}>
                     ✕
@@ -1880,187 +1757,62 @@ export default function Help() {
                 </div>
               </div>
 
-              {/* ZK attestion header */}
               <div style={{ padding: '14px 20px 6px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '12px' }}>
-                  <div style={{ fontSize: '10px', letterSpacing: '1.8px', fontWeight: '700', color: 'rgba(115,87,255,0.5)' }}>
-                    ZK ATTESTATIONS
+                <div style={{ marginBottom: '14px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '5px' }}>
+                    <div style={{ fontSize: '11px', fontWeight: 600, color: 'rgba(242,236,220,0.5)' }}>On-chain alias</div>
+                    {profile.nickname && <div style={{ fontSize: '9px', padding: '2px 6px', borderRadius: '4px', background: 'rgba(63,132,135,0.15)', color: '#3F8487', letterSpacing: '0.5px' }}>SET</div>}
                   </div>
-                  <HelpTip label="ZK attestations help">These are trust signals. The app registers the action quickly; proofs are added as checkpoints when they finish.</HelpTip>
+                  <input style={{
+                    width: '100%', padding: '8px 10px', background: 'rgba(255,255,255,0.05)',
+                    border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px',
+                    color: 'rgba(242,236,220,0.9)', fontSize: '13px', outline: 'none',
+                    boxSizing: 'border-box'
+                  }} placeholder="Anonymous" maxLength={20}
+                    value={profile.nickname} onChange={e => setProfile(p => ({ ...p, nickname: e.target.value }))} />
+                  <div style={{ fontSize: '9.5px', color: 'rgba(242,236,220,0.18)', marginTop: '4px', lineHeight: 1.4 }}>
+                    A pseudonym reveals nothing. No on-chain storage — it exists only in this session.
+                  </div>
                 </div>
 
-                    {/* Alias */}
-                    <div style={{ marginBottom: '14px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '5px' }}>
-                        <div style={{ fontSize: '11px', fontWeight: 600, color: 'rgba(242,236,220,0.5)' }}>On-chain alias</div>
-                        {profile.nickname && <div style={{ fontSize: '9px', padding: '2px 6px', borderRadius: '4px', background: 'rgba(63,132,135,0.15)', color: '#3F8487', letterSpacing: '0.5px' }}>SET</div>}
-                      </div>
-                      <input style={{
-                        width: '100%', padding: '8px 10px', background: 'rgba(255,255,255,0.05)',
-                        border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px',
-                        color: 'rgba(242,236,220,0.9)', fontSize: '13px', outline: 'none',
-                        boxSizing: 'border-box'
-                      }} placeholder="Anonymous" maxLength={20}
-                        value={profile.nickname} onChange={e => setProfile(p => ({ ...p, nickname: e.target.value }))} />
-                      <div style={{ fontSize: '9.5px', color: 'rgba(242,236,220,0.18)', marginTop: '4px', lineHeight: 1.4 }}>
-                        A pseudonym reveals nothing. No on-chain storage — it exists only in this session.
-                      </div>
-                    </div>
-
-                    {/* Contact info */}
-                    <div style={{ marginBottom: '14px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '5px' }}>
-                        <div style={{ fontSize: '11px', fontWeight: 600, color: 'rgba(242,236,220,0.5)' }}>Contact</div>
-                        {profile.contact && <div style={{ fontSize: '9px', padding: '2px 6px', borderRadius: '4px', background: 'rgba(63,132,135,0.15)', color: '#3F8487', letterSpacing: '0.5px' }}>SET</div>}
-                      </div>
-                      <input style={{
-                        width: '100%', padding: '8px 10px', background: 'rgba(255,255,255,0.05)',
-                        border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px',
-                        color: 'rgba(242,236,220,0.9)', fontSize: '13px', outline: 'none',
-                        boxSizing: 'border-box'
-                      }} placeholder="@telegram or +54 11 5555-5555" maxLength={40}
-                        value={profile.contact} onChange={e => setProfile(p => ({ ...p, contact: e.target.value }))} />
-                      <div style={{ fontSize: '9.5px', color: 'rgba(242,236,220,0.18)', marginTop: '4px', lineHeight: 1.4 }}>
-                        How responders reach you. Stored on-chain.
-                      </div>
-                    </div>
-
-                    {/* Character picker */}
-                    <div style={{ marginBottom: '14px' }}>
-                      <div style={{ fontSize: '11px', fontWeight: 600, color: 'rgba(242,236,220,0.5)', marginBottom: '6px' }}>
-                        Map avatar <span style={{ fontWeight: 400, color: 'rgba(242,236,220,0.2)' }}>· tap to override auto-pick</span>
-                      </div>
-                      <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                        {CHARS.default.map(name => (
-                          <button key={name} onClick={() => setSelectedChar(c => c === name ? null : name)}
-                            style={{
-                              width: '40px', height: '40px', padding: 0, borderRadius: '8px', overflow: 'hidden', cursor: 'pointer',
-                              background: myChar === name ? 'rgba(115,87,255,0.15)' : 'rgba(255,255,255,0.03)',
-                              border: myChar === name ? '2px solid #7357FF' : '2px solid rgba(255,255,255,0.06)',
-                            }}>
-                            <img src={`/assets/chars/${name}.png`} style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} alt="" />
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* ZK proof badges */}
-                    <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '14px', marginBottom: '6px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' }}>
-                        <div style={{ fontSize: '9px', letterSpacing: '1.5px', fontWeight: '700', color: 'rgba(242,236,220,0.2)' }}>
-                          ZK PROOFS
-                        </div>
-                        <HelpTip label="ZK proofs help">The proof validates data without exposing it fully. If it takes too long or fails, the help action stays registered and you can retry.</HelpTip>
-                      </div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                        {[
-                          { key: 'location', label: 'Proof of Location', desc: 'Generated automatically when you request or offer help' },
-                          { key: 'humanity', label: 'Proof of Humanity', desc: 'Funded Stellar wallet — sybil resistant' },
-                          { key: 'reputation', label: 'Proof of Reputation', desc: 'Completed arrivals on the HelPhone network' },
-                        ].map(p => {
-                          const active = proofs[p.key]
-                          return (
-                            <div key={p.key} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '7px 8px', borderRadius: '8px', background: active ? 'rgba(63,132,135,0.08)' : 'rgba(255,255,255,0.02)' }}>
-                              <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: active ? '#3F8487' : 'rgba(242,236,220,0.12)', flexShrink: 0 }} />
-                              <div style={{ flex: 1 }}>
-                                <div style={{ fontSize: '11px', fontWeight: 500, color: active ? '#3F8487' : 'rgba(242,236,220,0.25)' }}>{p.label}</div>
-                                <div style={{ fontSize: '9px', color: active ? 'rgba(63,132,135,0.5)' : 'rgba(242,236,220,0.12)', marginTop: '1px' }}>{p.desc}</div>
-                              </div>
-                              <div style={{ fontSize: '8px', padding: '2px 5px', borderRadius: '4px', background: active ? 'rgba(63,132,135,0.15)' : 'rgba(242,236,220,0.04)', color: active ? '#3F8487' : 'rgba(242,236,220,0.15)', letterSpacing: '0.5px' }}>
-                                {active ? 'ACTIVE' : 'INACTIVE'}
-                              </div>
-                            </div>
-                          )
-                        })}
-                      </div>
-
-                      {/* ZK Location Proof generator */}
-                      <div style={{ marginTop: '12px' }}>
-                        {zkState === 'idle' && !proofs.location && location && (
-                          <button onClick={handleGenerateProof} style={{
-                            width: '100%', padding: '9px 12px',
-                            background: 'rgba(115,87,255,0.12)', border: '1px solid rgba(115,87,255,0.25)',
-                            borderRadius: '8px', color: '#B3A6FF', fontSize: '12px', fontWeight: '600',
-                            cursor: 'pointer', textAlign: 'center'
-                          }}>
-                            Generate ZK Proof Now
-                          </button>
-                        )}
-                        {zkState === 'idle' && !proofs.location && !location && (
-                          <div style={{ fontSize: '10px', color: 'rgba(242,236,220,0.2)', textAlign: 'center', padding: '6px 0' }}>
-                            Set your location first to generate proof
-                          </div>
-                        )}
-                        {zkState === 'loading' && (
-                          <div style={{ padding: '10px 12px', borderRadius: '8px', background: 'rgba(115,87,255,0.08)', border: '1px solid rgba(115,87,255,0.15)' }}>
-                            <div style={{ fontSize: '11px', fontWeight: '600', color: '#B3A6FF', marginBottom: '4px' }}>Generating proof…</div>
-                            <div style={{ fontSize: '10px', color: 'rgba(242,236,220,0.3)' }}>UltraHonk circuit · checkpoint after on-chain action</div>
-                            <div style={{ marginTop: '8px', height: '2px', background: 'rgba(115,87,255,0.1)', borderRadius: '2px', overflow: 'hidden' }}>
-                              <div style={{ height: '100%', width: '60%', background: '#7357FF', borderRadius: '2px', animation: 'mdblink 1.5s ease-in-out infinite' }} />
-                            </div>
-                          </div>
-                        )}
-                        {zkState === 'error' && (
-                          <div style={{ fontSize: '10px', color: '#FF7A6B', marginTop: '6px', lineHeight: 1.4 }}>
-                            {zkError}
-                            <button onClick={pendingProofRegistration ? retryPendingProofRegistration : () => setZkState('idle')} style={{ marginLeft: '6px', background: 'none', border: 'none', color: 'rgba(242,236,220,0.3)', cursor: 'pointer', fontSize: '10px' }}>retry</button>
-                          </div>
-                        )}
-                        {zkState === 'done' && zkProof && (
-                          <div style={{ marginTop: '8px', padding: '10px 12px', borderRadius: '8px', background: 'rgba(63,132,135,0.08)', border: '1px solid rgba(63,132,135,0.2)' }}>
-                            <div style={{ fontSize: '10px', fontWeight: '600', color: '#3F8487', marginBottom: '4px' }}>Proof generated ✓</div>
-                            <div style={{ fontSize: '9px', color: 'rgba(63,132,135,0.5)', fontFamily: 'monospace', wordBreak: 'break-all', lineHeight: 1.4 }}>
-                              nullifier: {zkProof.nullifier.slice(0, 20)}…
-                            </div>
-                            <div style={{ marginTop: '8px' }}>
-                              {claimState === 'idle' && (
-                                <button onClick={handleClaimAid} style={{
-                                  width: '100%', padding: '8px', background: '#3F8487', border: 'none',
-                                  borderRadius: '6px', color: '#fff', fontSize: '11px', fontWeight: '600', cursor: 'pointer'
-                                }}>
-                                  Claim Aid On-chain →
-                                </button>
-                              )}
-                              {claimState === 'loading' && (
-                                <div style={{ fontSize: '10px', color: '#3F8487', textAlign: 'center' }}>Submitting proof…</div>
-                              )}
-                              {claimState === 'done' && (
-                                <div style={{ fontSize: '10px', color: '#3F8487', fontWeight: '600', textAlign: 'center' }}>Aid claimed ✓</div>
-                              )}
-                              {claimState === 'error' && (
-                                <div style={{ fontSize: '10px', color: '#FF7A6B', lineHeight: 1.4 }}>
-                                  {claimError}
-                                  <button onClick={() => setClaimState('idle')} style={{ marginLeft: '6px', background: 'none', border: 'none', color: 'rgba(242,236,220,0.3)', cursor: 'pointer', fontSize: '10px' }}>retry</button>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                <div style={{ marginBottom: '14px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '5px' }}>
+                    <div style={{ fontSize: '11px', fontWeight: 600, color: 'rgba(242,236,220,0.5)' }}>Contact</div>
+                    {profile.contact && <div style={{ fontSize: '9px', padding: '2px 6px', borderRadius: '4px', background: 'rgba(63,132,135,0.15)', color: '#3F8487', letterSpacing: '0.5px' }}>SET</div>}
                   </div>
-              </div>
-              )}
-        </div>
+                  <input style={{
+                    width: '100%', padding: '8px 10px', background: 'rgba(255,255,255,0.05)',
+                    border: '1px solid rgba(255,255,255,0.08)', borderRadius: '8px',
+                    color: 'rgba(242,236,220,0.9)', fontSize: '13px', outline: 'none',
+                    boxSizing: 'border-box'
+                  }} placeholder="@telegram or +54 11 5555-5555" maxLength={40}
+                    value={profile.contact} onChange={e => setProfile(p => ({ ...p, contact: e.target.value }))} />
+                  <div style={{ fontSize: '9.5px', color: 'rgba(242,236,220,0.18)', marginTop: '4px', lineHeight: 1.4 }}>
+                    How responders reach you. Stored on-chain.
+                  </div>
+                </div>
 
-        <FlowProgressModal
-          open={flowPopupOpen}
-          onClose={() => setFlowPopupOpen(false)}
-          title={flowPopupTitle}
-          accentColor={accentColor}
-          receiptAction={flowAction}
-          location={location}
-          profile={profile}
-          walletAddress={flowWalletAddress || activeWalletAddress}
-          entries={zkLog}
-          active={submitting || offerSubmitting || claimState === 'loading' || zkState === 'loading'}
-          txHash={flowProofTxHash || flowTxHash || ''}
-          actionTxHash={flowActionTxHash || ''}
-          proofTxHash={flowProofTxHash || ''}
-          error={submitError || zkError || claimError || ''}
-          canRetryProof={Boolean(pendingProofRegistration) && zkState === 'error'}
-          onRetryProof={retryPendingProofRegistration}
-        />
+                <div style={{ marginBottom: '14px' }}>
+                  <div style={{ fontSize: '11px', fontWeight: 600, color: 'rgba(242,236,220,0.5)', marginBottom: '6px' }}>
+                    Map avatar <span style={{ fontWeight: 400, color: 'rgba(242,236,220,0.2)' }}>· tap to override auto-pick</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                    {CHARS.default.map(name => (
+                      <button key={name} onClick={() => setSelectedChar(c => c === name ? null : name)}
+                        style={{
+                          width: '40px', height: '40px', padding: 0, borderRadius: '8px', overflow: 'hidden', cursor: 'pointer',
+                          background: myChar === name ? 'rgba(115,87,255,0.15)' : 'rgba(255,255,255,0.03)',
+                          border: myChar === name ? '2px solid #7357FF' : '2px solid rgba(255,255,255,0.06)',
+                        }}>
+                        <img src={`/assets/chars/${name}.png`} style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} alt="" />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
 
         <HelpOnboardingModal
           open={showOnboarding}
@@ -2068,152 +1820,12 @@ export default function Help() {
           onConnectWallet={() => promptWalletConnection()}
         />
 
-        {expertPopupOpen && activeExpertRecord && (
-          <div onClick={() => setExpertPopupOpen(false)} style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.66)',
-            zIndex: 9998, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px'
-          }}>
-            <div onClick={e => e.stopPropagation()} style={{
-              width: '100%', maxWidth: '420px', borderRadius: '18px',
-              background: '#1c2c24', border: '1px solid rgba(255,255,255,0.08)',
-              boxShadow: '0 24px 72px rgba(0,0,0,0.6)', overflow: 'hidden'
-            }}>
-              <div style={{ padding: '20px 22px', background: 'rgba(63,132,135,0.08)', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-                <div style={{ fontSize: '10px', letterSpacing: '1.8px', fontWeight: 700, color: '#3F8487', marginBottom: '8px' }}>
-                  VERIFIED CHECKPOINT
-                </div>
-                <h3 style={{ margin: 0, fontSize: '24px', lineHeight: 1.1, color: '#F4ECDC' }}>
-                  {receiptCopy(activeExpertRecord.lastAction).title}
-                </h3>
-                <p style={{ margin: '8px 0 0', fontSize: '13px', lineHeight: 1.5, color: 'rgba(242,236,220,0.62)' }}>
-                  {receiptCopy(activeExpertRecord.lastAction).body}
-                </p>
-              </div>
-              <div style={{ padding: '18px 22px 22px' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '16px' }}>
-                  {[
-                    ['Wallet', activeExpertRecord.walletAddress ? `${activeExpertRecord.walletAddress.slice(0, 8)}...${activeExpertRecord.walletAddress.slice(-6)}` : 'Unknown'],
-                    ['Action', actionLabel(activeExpertRecord.lastAction)],
-                    ['Network', activeExpertRecord.network || 'testnet'],
-                    ['Time', activeExpertRecord.verifiedAt ? new Date(activeExpertRecord.verifiedAt).toLocaleString() : 'n/a'],
-                  ].map(([label, value]) => (
-                    <div key={label} style={{ padding: '10px 12px', borderRadius: '12px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)' }}>
-                      <div style={{ fontSize: '9px', letterSpacing: '1px', color: 'rgba(242,236,220,0.32)', marginBottom: '4px' }}>{label}</div>
-                      <div style={{ fontSize: '12px', color: '#F4ECDC', wordBreak: 'break-word' }}>{value}</div>
-                    </div>
-                  ))}
-                </div>
-
-                <div style={{ marginBottom: '16px' }}>
-                  <div style={{ fontSize: '10px', letterSpacing: '1.4px', fontWeight: 700, color: 'rgba(242,236,220,0.3)', marginBottom: '8px' }}>
-                    VERIFICATION
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                    <div style={{ padding: '10px 12px', borderRadius: '10px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)', minWidth: 0 }}>
-                      <div style={{ fontSize: '9px', letterSpacing: '1px', color: 'rgba(242,236,220,0.32)', marginBottom: '5px' }}>ACTION TX</div>
-                      {activeExpertRecord.actionTxHash || activeExpertRecord.lastTxHash ? (
-                        <a
-                          href={stellarExpertTxUrl(activeExpertRecord.actionTxHash || activeExpertRecord.lastTxHash)}
-                          target="_blank"
-                          rel="noreferrer"
-                          style={{ fontSize: '11px', color: '#7fb8ba', textDecoration: 'none', wordBreak: 'break-all' }}
-                        >
-                          {shortHash(activeExpertRecord.actionTxHash || activeExpertRecord.lastTxHash)}
-                        </a>
-                      ) : (
-                        <div style={{ fontSize: '11px', color: 'rgba(242,236,220,0.34)' }}>Not available</div>
-                      )}
-                    </div>
-                    <div style={{
-                      padding: '10px 12px', borderRadius: '10px',
-                      background: activeExpertRecord.verificationTxHash ? 'rgba(63,132,135,0.1)' : 'rgba(255,255,255,0.04)',
-                      border: `1px solid ${activeExpertRecord.verificationTxHash ? 'rgba(63,132,135,0.25)' : 'rgba(255,255,255,0.06)'}`,
-                      minWidth: 0
-                    }}>
-                      <div style={{ fontSize: '9px', letterSpacing: '1px', color: 'rgba(242,236,220,0.32)', marginBottom: '5px' }}>ZK TX</div>
-                      {activeExpertRecord.verificationTxHash ? (
-                        <a
-                          href={stellarExpertTxUrl(activeExpertRecord.verificationTxHash)}
-                          target="_blank"
-                          rel="noreferrer"
-                          style={{ fontSize: '11px', color: '#7fb8ba', textDecoration: 'none', wordBreak: 'break-all' }}
-                        >
-                          {shortHash(activeExpertRecord.verificationTxHash)}
-                        </a>
-                      ) : (
-                        <div style={{ fontSize: '11px', color: 'rgba(242,236,220,0.34)' }}>Pending</div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div style={{ marginBottom: '16px' }}>
-                  <div style={{ fontSize: '10px', letterSpacing: '1.4px', fontWeight: 700, color: 'rgba(242,236,220,0.3)', marginBottom: '8px' }}>
-                    ACTIVITY
-                  </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    {(activeExpertRecord.history || []).slice().reverse().map((item, index) => (
-                      <div key={`${item.at}-${index}`} style={{ padding: '8px 10px', borderRadius: '10px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', alignItems: 'center' }}>
-                          <div style={{ fontSize: '12px', color: '#F4ECDC' }}>{actionLabel(item.action)}</div>
-                          <div style={{ fontSize: '10px', color: 'rgba(242,236,220,0.28)' }}>{new Date(item.at).toLocaleTimeString()}</div>
-                        </div>
-                        {item.txHash && (
-                          <a
-                            href={stellarExpertTxUrl(item.txHash)}
-                            target="_blank"
-                            rel="noreferrer"
-                            style={{ display: 'block', fontSize: '10px', color: 'rgba(63,132,135,0.82)', marginTop: '4px', wordBreak: 'break-all', textDecoration: 'none' }}
-                          >
-                            {item.proofFingerprint ? 'zk tx' : 'tx'} {shortHash(item.txHash)}
-                          </a>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  {receiptTxHash(activeExpertRecord) ? (
-                    <a
-                      href={stellarExpertTxUrl(receiptTxHash(activeExpertRecord))}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{
-                        flex: 1, padding: '11px 14px', borderRadius: '12px', border: '1px solid rgba(63,132,135,0.25)',
-                        background: '#3F8487', color: '#fff', fontSize: '14px', fontWeight: 700, textDecoration: 'none', textAlign: 'center'
-                      }}
-                    >
-                      Open receipt
-                    </a>
-                  ) : (
-                    <div style={{
-                      flex: 1, padding: '11px 14px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.08)',
-                      background: 'rgba(255,255,255,0.04)', color: 'rgba(242,236,220,0.36)', fontSize: '14px', fontWeight: 700, textAlign: 'center'
-                    }}>
-                      No receipt transaction yet
-                    </div>
-                  )}
-                  <button onClick={() => setExpertPopupOpen(false)} style={{
-                    padding: '11px 14px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.08)',
-                    background: 'rgba(255,255,255,0.05)', color: 'rgba(242,236,220,0.72)', fontSize: '14px', fontWeight: 700, cursor: 'pointer'
-                  }}>
-                    OK
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Hint overlay */}
         {!location && (
           <div id="hp-hint-overlay" style={{ position: 'absolute', bottom: '24px', left: '50%', transform: 'translateX(-50%)', background: '#234B4E', color: 'rgba(242,236,220,0.8)', padding: '10px 18px', borderRadius: '24px', fontSize: '13px', fontWeight: '500', boxShadow: '0 4px 20px rgba(0,0,0,0.25)', pointerEvents: 'none', zIndex: 999, whiteSpace: 'nowrap' }}>
             {locating ? 'Getting your location…' : isGetMode ? 'Allow location or click map to drop your pin' : 'Enable location to show responders where you are'}
           </div>
         )}
 
-        {/* Mobile form toggle */}
         <button id="hp-mobile-form-toggle" onClick={() => setShowMobileForm(o => !o)} style={{
           position: 'absolute', bottom: '20px', right: '20px', zIndex: 100,
           width: '50px', height: '50px', borderRadius: '50%', padding: 0,
@@ -2231,7 +1843,41 @@ export default function Help() {
         </button>
       </div>
 
-      {/* ── Emergency type modal ─────────────────────────────────── */}
+      {showCancelConfirm !== null && (
+        <div onClick={() => setShowCancelConfirm(null)} style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)',
+          zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px'
+        }}>
+          <div onClick={e => e.stopPropagation()} style={{
+            background: '#1c3535', borderRadius: '20px', padding: '28px 24px 20px',
+            width: '100%', maxWidth: '360px', textAlign: 'center',
+            boxShadow: '0 24px 64px rgba(0,0,0,0.55)'
+          }}>
+            <div style={{ fontSize: '32px', marginBottom: '12px' }}>⚠️</div>
+            <h3 style={{ margin: '0 0 6px', fontSize: '18px', fontWeight: '700', color: '#F4ECDC' }}>Cancelar solicitud</h3>
+            <p style={{ margin: '0 0 20px', fontSize: '13px', color: 'rgba(242,236,220,0.5)', lineHeight: 1.5 }}>
+              ¿Estás seguro? La solicitud #{showCancelConfirm} quedará registrada como cancelada en Stellar.
+            </p>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button onClick={() => setShowCancelConfirm(null)} style={{
+                flex: 1, padding: '10px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.08)',
+                background: 'rgba(255,255,255,0.05)', color: 'rgba(242,236,220,0.72)',
+                fontSize: '13px', fontWeight: '600', cursor: 'pointer'
+              }}>
+                Volver
+              </button>
+              <button onClick={() => handleCancel(showCancelConfirm)} style={{
+                flex: 1, padding: '10px', borderRadius: '10px', border: 'none',
+                background: '#FF7A6B', color: '#fff',
+                fontSize: '13px', fontWeight: '700', cursor: 'pointer'
+              }}>
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showEmergencyModal && (
         <div onClick={() => setShowEmergencyModal(false)} style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)',
