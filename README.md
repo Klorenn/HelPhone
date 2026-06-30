@@ -2,6 +2,18 @@
 
 HelPhone is a React + Vite community emergency response app built on Stellar. It combines wallet-gated help requests, Soroban contracts, and a local ZK prover for private location attestation.
 
+## The 3-minute story
+
+Someone is in trouble and needs help from nearby people — but broadcasting "I'm hurt, here is my exact address and my name" to a public blockchain is dangerous. HelPhone fixes that:
+
+1. **Emergency.** A person taps *Get help* and picks what happened (lost, fallen, medical, danger…).
+2. **Identity protected.** Their name and contact never leave the browser. Only a pseudonymous `Private request #N` is written on-chain.
+3. **Location proven, not revealed.** The exact GPS coordinate is used as a *private witness*. A Noir ZK proof is generated **locally** to prove "I am inside this zone" without disclosing where. Only a coarse ~1 km point and a 3 km proof box go on-chain.
+4. **Stellar verifies.** The proof fingerprint (nullifier) and transaction hash are recorded on Soroban testnet, visible in the live `ZK PRIVACY CHECKPOINT` panel.
+5. **Double-claim blocked.** The nullifier is `Poseidon2(secret_id, campaign_id)` — one claim per user per campaign, so the same proof can't be replayed.
+
+Privacy here is real, not theater: see [`anonymizeLocation`](src/pages/Help.jsx) (coarsens coordinates) and `createRequest(..., '', '', ...)` in [`handleSubmit`](src/pages/Help.jsx) (empty name/contact on-chain).
+
 ## What it does
 
 - Request help from nearby people
