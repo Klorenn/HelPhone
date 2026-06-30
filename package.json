@@ -2,11 +2,12 @@
   "name": "helphone",
   "version": "1.0.0",
   "description": "",
-  "main": "support.js",
+  "main": "server/index.js",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:vite": "vite",
     "server": "node server/index.js",
+    "start": "node server/index.js",
     "dev:all": "node scripts/dev.mjs",
     "build": "vite build",
     "preview": "vite preview",
@@ -17,7 +18,7 @@
   "license": "ISC",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": "22.x"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.0.2",
