@@ -328,7 +328,10 @@ export async function generateLocationProof({ lat, lng, campaignId = '1', recipi
     } catch (err) {
       if (!allowBrowserFallback) {
         onLog('ZK prover server is not available')
-        throw new Error(`${err.message}. Start the app with npm run dev so the local prover server is running.`)
+        const hint = import.meta.env.PROD
+          ? 'Set VITE_ZK_PROVER_URL to your hosted ZK prover (see README → Deploy).'
+          : 'Start the app with npm run dev so the local prover server is running.'
+        throw new Error(`${err.message}. ${hint}`)
       }
       onLog(`Server prover: ${err.message}. Falling back to browser because VITE_ZK_BROWSER_FALLBACK=true.`)
     }
