@@ -882,6 +882,13 @@ export default function Help() {
     if (!validLocation()) { alert('Enable your location first so the requester can see you on the map.'); return }
     const reqId = Number(req.id)
     if (!Number.isFinite(reqId)) { alert('Invalid request'); return }
+    const fresh = await getRequest(reqId)
+    if (fresh && fresh.status !== 'Pending') {
+      setSelectedRequest(null)
+      setOpenRequests(prev => prev.filter(r => r.id !== reqId))
+      alert('This request was already accepted by someone else.')
+      return
+    }
     const address = activeWalletAddress || await promptWalletConnection()
     if (!address) {
       return
@@ -1418,10 +1425,16 @@ export default function Help() {
                     <button onClick={() => setSelectedRequest(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'rgba(242,236,220,0.35)', fontSize: '18px', cursor: 'pointer' }}>×</button>
                   </div>
 
-                  <button onClick={() => handleOffer(selectedRequest)} disabled={offerSubmitting || !location}
-                    style={{ width: '100%', padding: '13px', background: isWalletConnected ? '#7357FF' : 'rgba(255,255,255,0.08)', color: isWalletConnected ? '#fff' : 'rgba(242,236,220,0.25)', border: 'none', borderRadius: '10px', fontSize: '15px', fontWeight: '600', cursor: location ? 'pointer' : 'default', opacity: offerSubmitting ? 0.6 : 1 }}>
-                    {offerSubmitting ? 'Confirming…' : !isWalletConnected ? 'Connect wallet first' : 'I\'ll help this person'}
-                  </button>
+                  {selectedRequest.status === 'Pending' ? (
+                    <button onClick={() => handleOffer(selectedRequest)} disabled={offerSubmitting || !location}
+                      style={{ width: '100%', padding: '13px', background: isWalletConnected ? '#7357FF' : 'rgba(255,255,255,0.08)', color: isWalletConnected ? '#fff' : 'rgba(242,236,220,0.25)', border: 'none', borderRadius: '10px', fontSize: '15px', fontWeight: '600', cursor: location ? 'pointer' : 'default', opacity: offerSubmitting ? 0.6 : 1 }}>
+                      {offerSubmitting ? 'Confirming…' : !isWalletConnected ? 'Connect wallet first' : 'I\'ll help this person'}
+                    </button>
+                  ) : (
+                    <div style={{ width: '100%', padding: '13px', borderRadius: '10px', fontSize: '14px', fontWeight: '600', textAlign: 'center', background: 'rgba(115,87,255,0.12)', color: '#7357FF' }}>
+                      Someone is already on the way
+                    </div>
+                  )}
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '8px', color: 'rgba(242,236,220,0.34)', fontSize: '11px', lineHeight: 1.45 }}>
                     <span>Helping creates your own public receipt after Stellar confirms.</span>
                   </div>
