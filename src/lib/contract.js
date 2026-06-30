@@ -252,7 +252,8 @@ export async function fundZone(publicInputsPrefix, amount, wallet) {
 async function sendWrite(rawTx, wallet) {
   const sim = await server.simulateTransaction(rawTx)
   if (sim.error) {
-    throw new Error(sim.error?.message || JSON.stringify(sim.error))
+    const msg = typeof sim.error === 'string' ? sim.error : sim.error?.message || JSON.stringify(sim.error)
+    throw new Error(msg)
   }
   const preparedTx = rpc.assembleTransaction(rawTx, sim, NETWORK).build()
   const signResult = await wallet.signTransaction(preparedTx.toXDR(), { networkPassphrase: NETWORK })
