@@ -145,6 +145,77 @@ function ExplorerLink({ label, hash }) {
   )
 }
 
+function ArrivalThanksModal({ open, onClose, requestLabel, txHash }) {
+  if (!open) return null
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="arrival-thanks-title"
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.68)',
+        zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: '20px'
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          width: '100%', maxWidth: '390px', borderRadius: '18px',
+          background: '#1c3535', border: '1px solid rgba(63,132,135,0.32)',
+          boxShadow: '0 24px 70px rgba(0,0,0,0.58)', padding: '24px 22px 20px',
+          textAlign: 'center'
+        }}
+      >
+        <div style={{
+          width: '52px', height: '52px', borderRadius: '50%', margin: '0 auto 14px',
+          background: 'rgba(63,132,135,0.16)', border: '1px solid rgba(63,132,135,0.42)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#3F8487'
+        }}>
+          <svg width="25" height="25" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M20 6L9 17l-5-5" />
+          </svg>
+        </div>
+        <h3 id="arrival-thanks-title" style={{
+          margin: '0 0 8px', fontFamily: "'Instrument Serif',serif",
+          fontWeight: 400, fontSize: '26px', lineHeight: 1.08, color: '#F4ECDC'
+        }}>
+          Thank you for helping
+        </h3>
+        <p style={{ margin: '0 0 14px', fontSize: '13px', color: 'rgba(242,236,220,0.56)', lineHeight: 1.55 }}>
+          Your arrival has been recorded on Stellar. Because you showed up, someone nearby knows they are not alone.
+        </p>
+        {requestLabel && (
+          <div style={{
+            margin: '0 auto 14px', display: 'inline-flex', padding: '5px 9px',
+            borderRadius: '7px', background: 'rgba(255,255,255,0.06)',
+            color: 'rgba(242,236,220,0.58)', fontSize: '11px', fontWeight: 700
+          }}>
+            {requestLabel}
+          </div>
+        )}
+        {txHash && (
+          <div style={{ marginBottom: '14px', display: 'flex', justifyContent: 'center' }}>
+            <ExplorerLink label="Arrival receipt" hash={txHash} />
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={onClose}
+          style={{
+            width: '100%', minHeight: '44px', padding: '11px 14px', borderRadius: '10px',
+            border: 'none', background: '#3F8487', color: '#fff',
+            fontSize: '14px', fontWeight: 800, cursor: 'pointer'
+          }}
+        >
+          Done
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function proofCampaignId(seed) {
   const text = String(seed || Date.now())
   let acc = 0n
@@ -321,6 +392,7 @@ function TrackingScreen({
   etaSeconds,
   isArrived,
   isResponderView,
+  isMarkingArrived,
   onMarkArrived,
   onResolve,
 }) {
@@ -402,11 +474,12 @@ function TrackingScreen({
 
           <div style={{ display: 'flex', gap: '8px' }}>
             {isResponderView && !isArrived && (
-              <button onClick={onMarkArrived} style={{
+              <button onClick={onMarkArrived} disabled={isMarkingArrived} style={{
                 flex: 1, padding: '11px 14px', borderRadius: '10px', border: 'none',
-                background: '#3F8487', color: '#fff', fontSize: '13px', fontWeight: 700, cursor: 'pointer'
+                background: '#3F8487', color: '#fff', fontSize: '13px', fontWeight: 700,
+                cursor: isMarkingArrived ? 'default' : 'pointer', opacity: isMarkingArrived ? 0.7 : 1
               }}>
-                Mark Arrived
+                {isMarkingArrived ? 'Recording arrival...' : 'Mark Arrived'}
               </button>
             )}
             {!isResponderView && isArrived && (
@@ -532,6 +605,8 @@ export default function Help() {
   const [trackingRequestId, setTrackingRequestId] = useState(null)
   const [trackingIndex, setTrackingIndex] = useState(null)
   const [responderArrived, setResponderArrived] = useState(false)
+  const [arrivalSubmitting, setArrivalSubmitting] = useState(false)
+  const [arrivalThanksOpen, setArrivalThanksOpen] = useState(false)
   const [requesterLocation, setRequesterLocation] = useState(null)
   const [zkStatus, setZkStatus] = useState('idle')
   const [zkLogs, setZkLogs] = useState([])
@@ -663,11 +738,17 @@ export default function Help() {
         const requests = []
         for (const id of ids) {
           const req = await getRequest(id)
-          if (req && (req.status === 'Pending' || req.status === 'Enroute')) {
+          if (req && req.status === 'Pending') {
             requests.push({ ...req, id })
           }
         }
-        if (mounted) setOpenRequests(requests)
+        if (mounted) {
+          setOpenRequests(requests)
+          setSelectedRequest(current => {
+            if (!current) return current
+            return requests.find(req => Number(req.id) === Number(current.id)) || null
+          })
+        }
       } catch (_) {}
     }
 
@@ -771,6 +852,40 @@ export default function Help() {
     setZkLogs([])
     setZkProof(null)
     setZkError('')
+  }
+
+  function removeOpenRequest(reqId) {
+    setSelectedRequest(current => Number(current?.id) === Number(reqId) ? null : current)
+    setOpenRequests(prev => prev.filter(r => Number(r.id) !== Number(reqId)))
+  }
+
+  function syncOpenRequest(reqId, fresh) {
+    const request = { ...fresh, id: reqId }
+    setOpenRequests(prev => prev.map(r => Number(r.id) === Number(reqId) ? request : r))
+    setSelectedRequest(current => Number(current?.id) === Number(reqId) ? request : current)
+    return request
+  }
+
+  function requestUnavailableMessage(request) {
+    if (!request) return 'This request is no longer available.'
+    if (request.status === 'Enroute') return 'Someone is already on the way for this request.'
+    if (request.status === 'Resolved') return 'This request has already been resolved.'
+    if (request.status === 'Cancelled') return 'This request was cancelled.'
+    return 'This request is no longer pending.'
+  }
+
+  async function refreshPendingRequest(reqId) {
+    const fresh = await getRequest(reqId)
+    if (!fresh || fresh.status !== 'Pending') {
+      removeOpenRequest(reqId)
+      alert(requestUnavailableMessage(fresh))
+      return null
+    }
+    return syncOpenRequest(reqId, fresh)
+  }
+
+  function isRequestStatusRace(err) {
+    return err?.operation === 'accept_request' && err?.contractCode === 3
   }
 
   async function buildPrivacyProof({ scope, lat, lng, campaignId, address, radiusMeters = 3000 }) {
@@ -882,13 +997,8 @@ export default function Help() {
     if (!validLocation()) { alert('Enable your location first so the requester can see you on the map.'); return }
     const reqId = Number(req.id)
     if (!Number.isFinite(reqId)) { alert('Invalid request'); return }
-    const fresh = await getRequest(reqId)
-    if (fresh && fresh.status !== 'Pending') {
-      setSelectedRequest(null)
-      setOpenRequests(prev => prev.filter(r => r.id !== reqId))
-      alert('This request was already accepted by someone else.')
-      return
-    }
+    const fresh = await refreshPendingRequest(reqId)
+    if (!fresh) return
     const address = activeWalletAddress || await promptWalletConnection()
     if (!address) {
       return
@@ -905,6 +1015,12 @@ export default function Help() {
         address,
         radiusMeters: 3000,
       })
+      const latest = await refreshPendingRequest(reqId)
+      if (!latest) {
+        pushZkLog('Request changed before Stellar confirmation')
+        setZkStatus('proved')
+        return
+      }
       const eta = Math.round(Math.random() * 480 + 180)
       const publicLocation = anonymizeLocation(location)
       const result = await acceptRequest(
@@ -918,7 +1034,7 @@ export default function Help() {
       setLastOfferReceipt({
         requestId: reqId,
         label: privateRequestLabel(reqId),
-        emergencyType: req.emergency_type,
+        emergencyType: latest.emergency_type,
         txHash: result.hash || '',
         proofId: checkpoint.nullifier,
         at: new Date().toISOString(),
@@ -926,15 +1042,39 @@ export default function Help() {
       setZkProof(prev => prev ? { ...prev, requestId: reqId, txHash: result.hash || '' } : prev)
       await recordZkCheckpoint(address, 'private_responder_proof', result.hash || '', checkpoint)
       setOpenRequests(prev => prev.filter(r => r.id !== reqId))
-      if (req.lat != null && req.lng != null) {
-        setRequesterLocation([req.lat, req.lng])
+      if (latest.lat != null && latest.lng != null) {
+        setRequesterLocation([latest.lat, latest.lng])
       }
     } catch (err) {
+      if (isRequestStatusRace(err)) {
+        removeOpenRequest(reqId)
+        setZkStatus('proved')
+        setZkError('')
+        pushZkLog('Request is no longer pending')
+        alert(err.message)
+        return
+      }
       setZkStatus('error')
       setZkError(err.message || 'ZK proof failed')
       alert('Could not accept request: ' + (err.message || ''))
+    } finally {
+      setOfferSubmitting(false)
     }
-    setOfferSubmitting(false)
+  }
+
+  async function handleMarkArrived() {
+    if (!lastOfferReceipt || arrivalSubmitting) return
+    setArrivalSubmitting(true)
+    try {
+      const result = await markArrived(activeWalletAddress, lastOfferReceipt.requestId, StellarWalletsKit)
+      setResponderArrived(true)
+      setLastOfferReceipt(prev => prev ? { ...prev, arrivalTxHash: result?.hash || prev.arrivalTxHash || '' } : prev)
+      setArrivalThanksOpen(true)
+    } catch (err) {
+      alert('Could not mark arrived: ' + (err.message || ''))
+    } finally {
+      setArrivalSubmitting(false)
+    }
   }
 
   useEffect(() => {
@@ -1383,20 +1523,13 @@ export default function Help() {
                         ARRIVED ✓
                       </div>
                     ) : (
-                      <button onClick={async () => {
-                        if (!lastOfferReceipt) return
-                        try {
-                          await markArrived(activeWalletAddress, lastOfferReceipt.requestId, StellarWalletsKit)
-                          setResponderArrived(true)
-                        } catch (err) {
-                          alert('Could not mark arrived: ' + (err.message || ''))
-                        }
-                      }} style={{
+                      <button onClick={handleMarkArrived} disabled={arrivalSubmitting} style={{
                         flex: 1, padding: '8px 10px', borderRadius: '8px', border: '1px solid rgba(63,132,135,0.25)',
                         background: 'rgba(63,132,135,0.12)', color: '#3F8487',
-                        fontSize: '11px', fontWeight: 800, cursor: 'pointer'
+                        fontSize: '11px', fontWeight: 800, cursor: arrivalSubmitting ? 'default' : 'pointer',
+                        opacity: arrivalSubmitting ? 0.7 : 1
                       }}>
-                        Mark Arrived
+                        {arrivalSubmitting ? 'Recording...' : 'Mark Arrived'}
                       </button>
                     )}
                   </div>
@@ -1653,14 +1786,8 @@ export default function Help() {
               etaSeconds={null}
               isArrived={responderArrived}
               isResponderView={true}
-              onMarkArrived={async () => {
-                try {
-                  await markArrived(activeWalletAddress, lastOfferReceipt.requestId, StellarWalletsKit)
-                  setResponderArrived(true)
-                } catch (err) {
-                  alert('Could not mark arrived: ' + (err.message || ''))
-                }
-              }}
+              isMarkingArrived={arrivalSubmitting}
+              onMarkArrived={handleMarkArrived}
             />
           )}
         </Map>
@@ -1856,6 +1983,13 @@ export default function Help() {
         </button>
       </div>
 
+      <ArrivalThanksModal
+        open={arrivalThanksOpen}
+        onClose={() => setArrivalThanksOpen(false)}
+        requestLabel={lastOfferReceipt?.label}
+        txHash={lastOfferReceipt?.arrivalTxHash}
+      />
+
       {showCancelConfirm !== null && (
         <div onClick={() => setShowCancelConfirm(null)} style={{
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)',
@@ -1867,9 +2001,9 @@ export default function Help() {
             boxShadow: '0 24px 64px rgba(0,0,0,0.55)'
           }}>
             <div style={{ fontSize: '32px', marginBottom: '12px' }}>⚠️</div>
-            <h3 style={{ margin: '0 0 6px', fontSize: '18px', fontWeight: '700', color: '#F4ECDC' }}>Cancelar solicitud</h3>
+            <h3 style={{ margin: '0 0 6px', fontSize: '18px', fontWeight: '700', color: '#F4ECDC' }}>Cancel request</h3>
             <p style={{ margin: '0 0 20px', fontSize: '13px', color: 'rgba(242,236,220,0.5)', lineHeight: 1.5 }}>
-              ¿Estás seguro? La solicitud #{showCancelConfirm} quedará registrada como cancelada en Stellar.
+              Are you sure? Request #{showCancelConfirm} will be recorded as cancelled on Stellar.
             </p>
             <div style={{ display: 'flex', gap: '8px' }}>
               <button onClick={() => setShowCancelConfirm(null)} style={{
@@ -1877,14 +2011,14 @@ export default function Help() {
                 background: 'rgba(255,255,255,0.05)', color: 'rgba(242,236,220,0.72)',
                 fontSize: '13px', fontWeight: '600', cursor: 'pointer'
               }}>
-                Volver
+                Back
               </button>
               <button onClick={() => handleCancel(showCancelConfirm)} style={{
                 flex: 1, padding: '10px', borderRadius: '10px', border: 'none',
                 background: '#FF7A6B', color: '#fff',
                 fontSize: '13px', fontWeight: '700', cursor: 'pointer'
               }}>
-                Cancelar
+                Cancel
               </button>
             </div>
           </div>

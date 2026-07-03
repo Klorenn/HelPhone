@@ -1,10 +1,10 @@
-# Contrato Soroban — HelPhone
+# Soroban Contract — HelPhone
 
 ## Stack
 
-- **Red:** Stellar Testnet
-- **Lenguaje:** Rust (Soroban SDK)
-- **Herramientas:** `soroban-cli`, `stellar-rpc-client` (frontend)
+- **Network:** Stellar Testnet
+- **Language:** Rust (Soroban SDK)
+- **Tools:** `soroban-cli`, `stellar-rpc-client` (frontend)
 
 ---
 
@@ -23,41 +23,41 @@ pub enum DataKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct Request {
-    pub requester: Address,        // wallet del que pide ayuda
-    pub lat: i64,                  // latitud * 1_000_000 (ej: -3432 → -34.32)
-    pub lng: i64,                  // longitud * 1_000_000
+    pub requester: Address,        // wallet requesting help
+    pub lat: i64,                  // latitude * 1_000_000 (example: -3432 -> -34.32)
+    pub lng: i64,                  // longitude * 1_000_000
     pub emergency_type: String,    // 'lost'|'fallen'|'medical'|'car'|'danger'|'other'
-    pub nickname: String,          // alias opcional (max 32 chars)
-    pub contact: String,           // medio de contacto (tel, telegram, etc.)
+    pub nickname: String,          // optional alias (max 32 chars)
+    pub contact: String,           // contact method (phone, Telegram, etc.)
     pub status: Status,
     pub created_at: u64,           // Unix timestamp (seconds)
-    pub resolved_at: Option<u64>,  // cuándo se resolvió/cerró
+    pub resolved_at: Option<u64>,  // when it was resolved/closed
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub enum Status {
-    Pending,    // abierto, esperando responders
-    Enroute,    // alguien ya va en camino
-    Resolved,   // se resolvió la situación
-    Cancelled,  // el requester canceló
+    Pending,    // open, waiting for responders
+    Enroute,    // someone is already on the way
+    Resolved,   // the situation was resolved
+    Cancelled,  // the requester cancelled
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct Responder {
-    pub responder: Address,    // wallet del que ayuda
-    pub lat: i64,              // posición cuando aceptó
+    pub responder: Address,    // wallet helping
+    pub lat: i64,              // position when accepted
     pub lng: i64,
-    pub eta_seconds: u32,      // ETA estimado en segundos
-    pub arrived: bool,         // si realmente llegó
+    pub eta_seconds: u32,      // estimated ETA in seconds
+    pub arrived: bool,         // whether the responder actually arrived
     pub responded_at: u64,     // timestamp
 }
 ```
 
 ---
 
-## Funciones
+## Functions
 
 ### `create_request`
 
@@ -72,9 +72,9 @@ fn create_request(
 ) -> u64
 ```
 
-- Emite `RequestCreated { id, requester, lat, lng }`
-- Requiere `requester.require_auth()`
-- Incrementa `RequestCount`, guarda `Request` con `status: Pending`
+- Emits `RequestCreated { id, requester, lat, lng }`
+- Requires `requester.require_auth()`
+- Increments `RequestCount` and stores the `Request` with `status: Pending`
 
 ### `accept_request`
 
@@ -86,14 +86,14 @@ fn accept_request(
     lat: i64,
     lng: i64,
     eta_seconds: u32,
-) -> u32  // devuelve el index del responder
+) -> u32  // returns the responder index
 ```
 
-- Requiere `responder.require_auth()`
-- Requiere que `request.status == Pending`
-- Setea `request.status = Enroute`
-- Guarda `Responder`, incrementa `ResponderCount`
-- Emite `RequestAccepted { request_id, responder, eta_seconds }`
+- Requires `responder.require_auth()`
+- Requires `request.status == Pending`
+- Sets `request.status = Enroute`
+- Stores `Responder` and increments `ResponderCount`
+- Emits `RequestAccepted { request_id, responder, eta_seconds }`
 
 ### `update_location`
 
@@ -107,11 +107,11 @@ fn update_location(
 )
 ```
 
-- **Sin `require_auth`** — la posición es pública (ya se ve en el mapa). El frontend la firma con un keypair efímero (`getTrackingSigner`) para no pedir firma de wallet cada pocos segundos.
-- Busca el `Responder` que coincide con `responder` dentro del request y actualiza `lat`/`lng`.
-- Panic `NotFound` si el responder no existe en ese request.
-- Emite `LocUpd { request_id, responder, lat, lng }`.
-- ⚠️ Trade-off: al no tener auth, cualquiera puede falsificar la posición de un responder. Aceptable para tracking de demo; gatear con `responder.require_auth()` si se quiere endurecer.
+- **No `require_auth`** — the position is public because it is already visible on the map. The frontend signs it with an ephemeral keypair (`getTrackingSigner`) to avoid asking for a wallet signature every few seconds.
+- Looks for the `Responder` matching `responder` within the request and updates `lat`/`lng`.
+- Panics with `NotFound` if the responder does not exist in that request.
+- Emits `LocUpd { request_id, responder, lat, lng }`.
+- Trade-off: without auth, anyone can spoof a responder's position. This is acceptable for demo tracking; gate it with `responder.require_auth()` to harden it.
 
 ### `mark_arrived`
 
@@ -123,8 +123,8 @@ fn mark_arrived(
 )
 ```
 
-- Marca `responder.arrived = true`
-- Emite `ResponderArrived { request_id, responder }`
+- Marks `responder.arrived = true`
+- Emits `ResponderArrived { request_id, responder }`
 
 ### `resolve_request`
 
@@ -136,10 +136,10 @@ fn resolve_request(
 )
 ```
 
-- Requiere `requester.require_auth()`
-- Solo quien creó el request puede resolverlo
-- Setea `status: Resolved`, guarda `resolved_at`
-- Emite `RequestResolved { request_id }`
+- Requires `requester.require_auth()`
+- Only the original requester can resolve it
+- Sets `status: Resolved` and stores `resolved_at`
+- Emits `RequestResolved { request_id }`
 
 ### `cancel_request`
 
@@ -151,10 +151,10 @@ fn cancel_request(
 )
 ```
 
-- Requiere `requester.require_auth()`
-- Solo funciona si `status == Pending`
-- Setea `status: Cancelled`
-- Emite `RequestCancelled { request_id }`
+- Requires `requester.require_auth()`
+- Only works if `status == Pending`
+- Sets `status: Cancelled`
+- Emits `RequestCancelled { request_id }`
 
 ### `get_request`
 
@@ -162,7 +162,7 @@ fn cancel_request(
 fn get_request(env: Env, request_id: u64) -> Option<Request>
 ```
 
-- Read-only. Devuelve el request o `None`.
+- Read-only. Returns the request or `None`.
 
 ### `get_responder`
 
@@ -170,7 +170,7 @@ fn get_request(env: Env, request_id: u64) -> Option<Request>
 fn get_responder(env: Env, request_id: u64, index: u32) -> Option<Responder>
 ```
 
-- Read-only. Devuelve un responder específico.
+- Read-only. Returns a specific responder.
 
 ### `get_request_count`
 
@@ -184,8 +184,8 @@ fn get_request_count(env: Env) -> u64
 fn get_active_requests(env: Env, max: u32) -> Vec<u64>
 ```
 
-- Itera request IDs desde `RequestCount` hacia atrás, devuelve los que están `Pending` o `Enroute`.
-- Máximo `max` resultados.
+- Iterates request IDs backward from `RequestCount`, returning those that are `Pending` or `Enroute`.
+- Maximum `max` results.
 
 ### `get_responder_count`
 
@@ -199,7 +199,7 @@ fn get_responder_count(env: Env, request_id: u64) -> u32
 fn get_ranking(env: Env, limit: u32) -> Vec<RankingEntry>
 ```
 
-- Devuelve los responders con más arribos, ordenados descendente.
+- Returns responders with the most arrivals, sorted descending.
 
 ```rust
 #[contracttype]
@@ -225,14 +225,14 @@ pub enum HelPhoneEvent {
 }
 ```
 
-El frontend se subscribe a estos events via `getEvents()` del RPC de Stellar para actualizar el mapa en tiempo real (reemplaza los `supabase.channel` subscriptions).
+The frontend subscribes to these events through Stellar RPC `getEvents()` to update the map in real time, replacing the `supabase.channel` subscriptions.
 
 ---
 
 ## Deploy (Testnet)
 
 ```bash
-# 1. Build (usa stellar CLI)
+# 1. Build (uses Stellar CLI)
 stellar contract build
 
 # 2. Deploy a testnet
@@ -253,9 +253,9 @@ stellar contract deploy \
 | **Wasm size** | 11,966 bytes |
 | **Functions** | 11 exported |
 | **Wallet source** | `helphone-deployer` (`GAEFEAC7...`) |
-| **Código fuente** | `contract/contracts/helphone-contract/src/lib.rs` |
+| **Source code** | `contract/contracts/helphone-contract/src/lib.rs` |
 
-Verificado: `get_request_count` → 0, `create_request` → devuelve id 1 con evento `RqCreated` emitido.
+Verified: `get_request_count` -> 0, `create_request` -> returns id 1 with the `RqCreated` event emitted.
 
 ### Identity
 
@@ -268,53 +268,53 @@ stellar keys fund helphone-deployer --network testnet
 
 ## Frontend Migration
 
-| Hoy (Supabase) | Mañana (Soroban) | Estado |
+| Today (Supabase) | Tomorrow (Soroban) | Status |
 |---|---|---|
 | `supabase.from('requests').insert(...)` | `contract.create_request(...)` via `stellar-wallet-kit` | ✅ |
 | `supabase.from('responders').insert(...)` | `contract.accept_request(...)` | ✅ |
-| `supabase.channel(...).on('postgres_changes', ...)` | Poll cada 5s `get_active_requests` / cada 3s `get_responder_count` | ✅ |
-| `supabase.from('responders').select(...).eq('status','arrived')` | `contract.get_ranking(...)` | Pendiente en Ranking.jsx |
-| No hay fees | Los writes pagan fee mínimo en XLM (~0.00001 XLM) | ✅ |
-| Photos (base64 en DB) | Eliminado — no on-chain | ✅ |
-| `gender` field | Reemplazado por `contact` (tel/telegram) | ✅ |
-| Sin emergency type | `emergency_type: String` agregado al contrato v2 | ✅ |
-| Sin wallet obligatorio | Wallet Stellar conectada (Testnet) | ✅ |
+| `supabase.channel(...).on('postgres_changes', ...)` | Poll every 5s with `get_active_requests` / every 3s with `get_responder_count` | ✅ |
+| `supabase.from('responders').select(...).eq('status','arrived')` | `contract.get_ranking(...)` | Pending in Ranking.jsx |
+| No fees | Writes pay a minimal XLM fee (~0.00001 XLM) | ✅ |
+| Photos (base64 in DB) | Removed — not on-chain | ✅ |
+| `gender` field | Replaced by `contact` (phone/Telegram) | ✅ |
+| No emergency type | `emergency_type: String` added in contract v2 | ✅ |
+| No wallet required | Connected Stellar wallet (Testnet) | ✅ |
 
-### Archivos modificados
+### Modified Files
 
-| Archivo | Cambio |
+| File | Change |
 |---|---|
-| `src/lib/contract.js` | Helper con todas las funciones del contrato Soroban |
-| `src/pages/Help.jsx` | Sacado Supabase, conectado al contrato, polling, emergency type, ZK proofs |
-| `src/pages/Ranking.jsx` | Migrado a `get_ranking()` del contrato |
+| `src/lib/contract.js` | Helper with all Soroban contract functions |
+| `src/pages/Help.jsx` | Removed Supabase, connected the contract, polling, emergency type, ZK proofs |
+| `src/pages/Ranking.jsx` | Migrated to contract `get_ranking()` |
 | `src/main.jsx` | WalletProvider `PUBLIC → TESTNET` |
-| `src/lib/supabase.js` | **Eliminado** |
-| `@supabase/supabase-js` | **Eliminado** de package.json |
+| `src/lib/supabase.js` | **Removed** |
+| `@supabase/supabase-js` | **Removed** from package.json |
 
-### Contract v2
+### Contract v2 (deprecated — do not use)
 
 - **Contract ID**: `CDKOCBOBOBZOE3WRIQSHRU6Q75VX5UNP7BRBEXCI4QCC5QXQIGUSJZZU`
-- `Request` struct ahora incluye `emergency_type: String`
-- `create_request` recibe 6 args (se agregó `emergency_type` entre `lng` y `nickname`)
+- `Request` struct now includes `emergency_type: String`
+- `create_request` receives 6 args (`emergency_type` was added between `lng` and `nickname`)
 
-### Contract v3 (deployado — actual)
+### Contract v3 (deployed — current)
 
 - **Contract ID**: `CDP5XZ7UYCGSQBYRDYM2OEAUQJULBZPULSQXK7LGNAJTRXRG3VHZLSHY`
 - **Network**: Stellar Testnet
-- Agregada función `update_location` (tracking live de responders) + evento `LocUpd`.
-- **Privacidad**: el frontend manda `nickname` y `contact` **vacíos** on-chain (`createRequest(..., '', '', ...)`). Nombre/contacto reales quedan solo en `localStorage` del navegador.
-- **Ubicación**: solo va al chain una versión gruesa (`anonymizeLocation` redondea a 2 decimales, ~1 km). La coordenada exacta se usa únicamente como witness privado del proof ZK (Noir), que prueba "estoy dentro de la zona" sin revelar dónde.
-- Es el ID que usa `src/lib/contract.js` (`CONTRACT_ID`).
+- Added `update_location` for live responder tracking, plus the `LocUpd` event.
+- **Privacy**: the frontend sends empty `nickname` and `contact` values on-chain (`createRequest(..., '', '', ...)`). Real name/contact values stay only in browser `localStorage`.
+- **Location**: only a coarse location goes on-chain (`anonymizeLocation` rounds to 2 decimals, about 1 km). The exact coordinate is used only as the private witness for the ZK proof (Noir), proving "I am inside the zone" without revealing where.
+- This is the default ID used by `src/lib/contract.js`; production can override it with `VITE_HELPHONE_CONTRACT_ID`.
 
 ---
 
-## Próximos Pasos
+## Next Steps
 
-1. ✅ Crear proyecto Rust con `stellar contract init`
-2. ✅ Implementar el contrato
+1. ✅ Create the Rust project with `stellar contract init`
+2. ✅ Implement the contract
 3. ✅ Build + Deploy a testnet
-4. ✅ Migrar `Help.jsx` — sacar Supabase, conectar al contrato
-5. ✅ Migrar `Ranking.jsx` — leer ranking del contrato
-6. ✅ Eliminar `src/lib/supabase.js` y `@supabase/supabase-js`
-7. ✅ ZK proof badges — dinámicos en vez de "SOON"
+4. ✅ Migrate `Help.jsx` — remove Supabase, connect the contract
+5. ✅ Migrate `Ranking.jsx` — read ranking from the contract
+6. ✅ Remove `src/lib/supabase.js` and `@supabase/supabase-js`
+7. ✅ ZK proof badges — dynamic instead of "SOON"
 8. ⬜ Test end-to-end
