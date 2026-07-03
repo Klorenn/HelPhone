@@ -177,8 +177,8 @@ Each proof type shows:
 
 ## Next Step
 
-¿Arrancamos por Phase 1 — armar el circuito `pol.circom` con la aproximación de distancia? Necesito:
+Start with Phase 1: build the `pol.circom` circuit with the approximate distance check. Needed:
 
-1. Definir el fixed-point scaling (e.g., lat/lng × 10^6 → integer)
-2. La fórmula de distancia exacta que vamos a usar
-3. Si hacemos la trusted setup local o usamos una ceremony
+1. Define the fixed-point scaling (e.g., lat/lng × 10^6 → integer)
+2. Define the exact distance formula to use
+3. Decide whether to run a local trusted setup or use a ceremony

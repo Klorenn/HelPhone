@@ -11,6 +11,7 @@ const PROVER_INIT_TIMEOUT_MS = 2 * 60 * 1000
 const PROOF_TIMEOUT_MS = 5 * 60 * 1000
 const SERVER_HEALTH_TIMEOUT_MS = 2500
 const SERVER_PROOF_TIMEOUT_MS = 10 * 60 * 1000
+const PRODUCTION_ZK_PROVER_URL = 'https://helphone.onrender.com'
 
 function normalizeBase64(input, label = 'Base64 value') {
   if (typeof input !== 'string') {
@@ -318,7 +319,7 @@ function buildCampaignPrefix(publicInputsBytes) {
  * @returns {{ proof: Uint8Array, publicInputsBytes: Uint8Array, nullifier: string }}
  */
 export async function generateLocationProof({ lat, lng, campaignId = '1', recipientAddress, zone, onLog = () => {} }) {
-  const proverUrl = (import.meta.env.VITE_ZK_PROVER_URL || '/zk').replace(/\/$/, '')
+  const proverUrl = resolveProverUrl()
   const allowBrowserFallback = import.meta.env.VITE_ZK_BROWSER_FALLBACK === 'true'
   const proofZone = normalizeZone(zone)
 
@@ -351,10 +352,19 @@ export async function generateLocationProof({ lat, lng, campaignId = '1', recipi
   }
 }
 
+function resolveProverUrl() {
+  const configured = (import.meta.env.VITE_ZK_PROVER_URL || '').trim()
+  const url = configured || '/zk'
+  if (import.meta.env.PROD && url === '/zk') {
+    return PRODUCTION_ZK_PROVER_URL
+  }
+  return url.replace(/\/$/, '')
+}
+
 async function _requestServerProof({ lat, lng, campaignId = '1', recipientAddress, zone, onLog = () => {}, proverUrl }) {
-  onLog('Checking local ZK prover server')
+  onLog('Checking ZK prover server')
   await _checkServerProver(proverUrl, onLog)
-  onLog('Requesting proof from local prover server')
+  onLog('Requesting proof from ZK prover server')
   const secretId = getOrCreateSecret()
   const recipientField = addressToField(recipientAddress)
 
@@ -404,18 +414,18 @@ async function _checkServerProver(proverUrl, onLog) {
   try {
     res = await fetchWithTimeout(proverEndpoint(proverUrl, '/health'), { cache: 'no-store' }, SERVER_HEALTH_TIMEOUT_MS)
   } catch {
-    throw new Error('Local ZK prover server is unreachable')
+    throw new Error('ZK prover server is unreachable')
   }
 
   if (!res.ok) {
-    throw new Error(`Local ZK prover health check returned ${res.status}`)
+    throw new Error(`ZK prover health check returned ${res.status}`)
   }
 
   const data = await res.json().catch(() => ({}))
   if (data.ready) {
-    onLog('Local ZK prover is ready')
+    onLog('ZK prover is ready')
   } else {
-    onLog('Local ZK prover is warming up; first run downloads CRS once')
+    onLog('ZK prover is warming up; first run downloads CRS once')
   }
 }
 

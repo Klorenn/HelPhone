@@ -3,7 +3,8 @@ import {
   nativeToScVal, scValToNative, Networks, BASE_FEE,
 } from '@stellar/stellar-sdk'
 
-const CONTRACT_ID = 'CDP5XZ7UYCGSQBYRDYM2OEAUQJULBZPULSQXK7LGNAJTRXRG3VHZLSHY'
+const DEFAULT_CONTRACT_ID = 'CDP5XZ7UYCGSQBYRDYM2OEAUQJULBZPULSQXK7LGNAJTRXRG3VHZLSHY'
+const CONTRACT_ID = import.meta.env?.VITE_HELPHONE_CONTRACT_ID || DEFAULT_CONTRACT_ID
 const RPC_URL = 'https://soroban-testnet.stellar.org'
 const FRIENDBOT_URL = 'https://friendbot.stellar.org'
 const NETWORK = Networks.TESTNET
@@ -223,7 +224,7 @@ export async function claimAid(recipient, publicInputsBytes, proofBytes, wallet)
     }))
     .setTimeout(60)
     .build()
-  return await sendWrite(tx, wallet)
+  return await sendWrite(tx, wallet, 'claim_aid')
 }
 
 export async function fundZone(publicInputsPrefix, amount, wallet) {
@@ -244,16 +245,62 @@ export async function fundZone(publicInputsPrefix, amount, wallet) {
     }))
     .setTimeout(60)
     .build()
-  return await sendWrite(tx, wallet)
+  return await sendWrite(tx, wallet, 'fund_zone')
 }
 
 // ── Writes (require wallet) ────────────────────────────────────
 
-async function sendWrite(rawTx, wallet) {
+const CONTRACT_ERROR_MESSAGES = {
+  create_request: {
+    1: 'Request was not found.',
+    2: 'This wallet is not authorized for that action.',
+  },
+  accept_request: {
+    1: 'This request was not found.',
+    2: 'This wallet is not authorized to help with this request.',
+    3: 'This request is no longer pending. Someone else may already be on the way.',
+  },
+  mark_arrived: {
+    1: 'This request or responder was not found.',
+    2: 'This wallet is not authorized to mark arrival.',
+    4: 'You already marked yourself as arrived.',
+  },
+  resolve_request: {
+    1: 'This request was not found.',
+    2: 'Only the requester can resolve this request.',
+    3: 'This request can only be resolved once a responder is on the way.',
+  },
+  cancel_request: {
+    1: 'This request was not found.',
+    2: 'Only the requester can cancel this request.',
+    3: 'This request can only be cancelled while it is pending.',
+  },
+  record_expert_verification: {
+    2: 'This wallet is not authorized to record the checkpoint.',
+  },
+}
+
+function parseContractErrorCode(message) {
+  const text = String(message || '')
+  const match = text.match(/Contract,\s*#(\d+)/i)
+  return match ? Number(match[1]) : null
+}
+
+function buildContractError(rawError, operation) {
+  const raw = typeof rawError === 'string' ? rawError : rawError?.message || JSON.stringify(rawError)
+  const contractCode = parseContractErrorCode(raw)
+  const friendly = contractCode ? CONTRACT_ERROR_MESSAGES[operation]?.[contractCode] : ''
+  const err = new Error(friendly || raw)
+  err.contractCode = contractCode
+  err.operation = operation
+  err.rawMessage = raw
+  return err
+}
+
+async function sendWrite(rawTx, wallet, operation = '') {
   const sim = await server.simulateTransaction(rawTx)
   if (sim.error) {
-    const msg = typeof sim.error === 'string' ? sim.error : sim.error?.message || JSON.stringify(sim.error)
-    throw new Error(msg)
+    throw buildContractError(sim.error, operation)
   }
   const preparedTx = rpc.assembleTransaction(rawTx, sim, NETWORK).build()
   const signResult = await wallet.signTransaction(preparedTx.toXDR(), { networkPassphrase: NETWORK })
@@ -311,7 +358,7 @@ export async function createRequest(requester, lat, lng, emergencyType, nickname
     .setTimeout(30)
     .build()
 
-  const result = await sendWrite(tx, wallet)
+  const result = await sendWrite(tx, wallet, 'create_request')
   const retval = scValToNative(result.returnValue)
   return { requestId: Number(retval), hash: result.hash }
 }
@@ -336,7 +383,7 @@ export async function acceptRequest(responder, requestId, lat, lng, etaSeconds, 
     .setTimeout(30)
     .build()
 
-  const result = await sendWrite(tx, wallet)
+  const result = await sendWrite(tx, wallet, 'accept_request')
   const retval = scValToNative(result.returnValue)
   return { index: retval, hash: result.hash }
 }
@@ -358,7 +405,7 @@ export async function markArrived(responder, requestId, wallet) {
     .setTimeout(30)
     .build()
 
-  await sendWrite(tx, wallet)
+  return await sendWrite(tx, wallet, 'mark_arrived')
 }
 
 let trackingKeypair = null
@@ -424,7 +471,7 @@ export async function resolveRequest(requester, requestId, wallet) {
     .setTimeout(30)
     .build()
 
-  await sendWrite(tx, wallet)
+  await sendWrite(tx, wallet, 'resolve_request')
 }
 
 export async function cancelRequest(requester, requestId, wallet) {
@@ -444,7 +491,7 @@ export async function cancelRequest(requester, requestId, wallet) {
     .setTimeout(30)
     .build()
 
-  await sendWrite(tx, wallet)
+  await sendWrite(tx, wallet, 'cancel_request')
 }
 
 export async function recordExpertVerification(walletAddress, action, txHash, proofFingerprint, wallet) {
@@ -467,5 +514,5 @@ export async function recordExpertVerification(walletAddress, action, txHash, pr
     .setTimeout(30)
     .build()
 
-  return await sendWrite(tx, wallet)
+  return await sendWrite(tx, wallet, 'record_expert_verification')
 }
